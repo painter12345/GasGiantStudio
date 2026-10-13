@@ -1,0 +1,185 @@
+{
+ "name": "Lavender",
+ "seed": 46,
+ "steps": 100,
+ "keyframes": 4,
+ "files": {
+  "color": "Lavender_color.dds",
+  "normal": "Lavender_normal.dds",
+  "flow": "GiantFlow/Lavender_flow.truecolor",
+  "emissive": "Lavender_emissive.dds"
+ },
+ "bands": [
+  [
+   -90,
+   [
+    142,
+    148,
+    186
+   ]
+  ],
+  [
+   -45,
+   [
+    167,
+    152,
+    179
+   ]
+  ],
+  [
+   -27,
+   [
+    200,
+    176,
+    174
+   ]
+  ],
+  [
+   -13,
+   [
+    234,
+    202,
+    182
+   ]
+  ],
+  [
+   9,
+   [
+    178,
+    161,
+    183
+   ]
+  ],
+  [
+   22,
+   [
+    168,
+    153,
+    184
+   ]
+  ],
+  [
+   37,
+   [
+    188,
+    167,
+    176
+   ]
+  ],
+  [
+   47,
+   [
+    158,
+    150,
+    182
+   ]
+  ],
+  [
+   62,
+   [
+    141,
+    149,
+    187
+   ]
+  ]
+ ],
+ "band_blend": 3.6,
+ "edges": [
+  {
+   "lat": 62,
+   "spin": 1,
+   "width": 0.0034,
+   "curl": 0.3
+  },
+  {
+   "lat": 49,
+   "spin": -1,
+   "width": 0.0047,
+   "curl": 0.4
+  },
+  {
+   "lat": 36,
+   "spin": 1,
+   "width": 0.0051,
+   "curl": 0.45
+  },
+  {
+   "lat": 22,
+   "spin": -1,
+   "width": 0.0038,
+   "curl": 0.35
+  },
+  {
+   "lat": 9,
+   "spin": 1,
+   "width": 0.006,
+   "curl": 0.5
+  },
+  {
+   "lat": -13,
+   "spin": -1,
+   "width": 0.0055,
+   "curl": 0.5
+  },
+  {
+   "lat": -27,
+   "spin": 1,
+   "width": 0.0043,
+   "curl": 0.4
+  },
+  {
+   "lat": -45,
+   "spin": -1,
+   "width": 0.0047,
+   "curl": 0.4
+  },
+  {
+   "lat": -58,
+   "spin": 1,
+   "width": 0.0034,
+   "curl": 0.3
+  }
+ ],
+ "curl_strength": 12.0,
+ "curl_spacing": 6.5,
+ "jets": 0.12,
+ "turbulence": 0.0007,
+ "edge_wobble": 2.6,
+ "polar_calm": [
+  60,
+  76
+ ],
+ "polar_smooth": [
+  50,
+  64
+ ],
+ "storms": {
+  "count": 10,
+  "lat_range": [
+   -40,
+   44
+  ],
+  "size": [
+   0.0035,
+   0.006
+  ],
+  "turns": 2.6,
+  "core": 0.3,
+  "core_size": 0.3,
+  "core_color": [
+   244,
+   226,
+   214
+  ]
+ },
+ "big_storms": [],
+ "blur": 0.75,
+ "normal_strength": 6.0,
+ "emission": [
+  {
+   "band": 3,
+   "color": null,
+   "brightness": 0.5
+  }
+ ]
+}

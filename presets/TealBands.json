@@ -1,0 +1,165 @@
+{
+ "name": "TealBands",
+ "seed": 13918,
+ "steps": 100,
+ "keyframes": 4,
+ "files": {
+  "color": "TealBands_color.dds",
+  "normal": "TealBands_normal.dds",
+  "flow": "GiantFlow/TealBands_flow.truecolor"
+ },
+ "bands": [
+  [
+   -90,
+   [
+    120,
+    150,
+    140
+   ]
+  ],
+  [
+   -40,
+   [
+    150,
+    185,
+    160
+   ]
+  ],
+  [
+   -18,
+   [
+    200,
+    215,
+    170
+   ]
+  ],
+  [
+   -6,
+   [
+    230,
+    232,
+    190
+   ]
+  ],
+  [
+   10,
+   [
+    160,
+    195,
+    170
+   ]
+  ],
+  [
+   30,
+   [
+    120,
+    165,
+    150
+   ]
+  ],
+  [
+   55,
+   [
+    105,
+    140,
+    140
+   ]
+  ]
+ ],
+ "band_blend": 3.6,
+ "edges": [
+  {
+   "lat": 55,
+   "spin": 1,
+   "width": 0.004,
+   "curl": 0.35
+  },
+  {
+   "lat": 30,
+   "spin": -1,
+   "width": 0.005,
+   "curl": 0.45
+  },
+  {
+   "lat": 10,
+   "spin": 1,
+   "width": 0.006,
+   "curl": 0.5
+  },
+  {
+   "lat": -6,
+   "spin": -1,
+   "width": 0.004,
+   "curl": 0.4
+  },
+  {
+   "lat": -18,
+   "spin": 1,
+   "width": 0.0055,
+   "curl": 0.5
+  },
+  {
+   "lat": -40,
+   "spin": -1,
+   "width": 0.0045,
+   "curl": 0.4
+  }
+ ],
+ "curl_strength": 12.0,
+ "curl_spacing": 6.5,
+ "jets": 0.12,
+ "turbulence": 0.0007,
+ "edge_wobble": 2.6,
+ "polar_calm": [
+  60,
+  76
+ ],
+ "polar_smooth": [
+  50,
+  64
+ ],
+ "storms": {
+  "count": 10,
+  "lat_range": [
+   -40,
+   44
+  ],
+  "size": [
+   0.0035,
+   0.006
+  ],
+  "turns": 2.6,
+  "core": 0.3,
+  "core_size": 0.3,
+  "core_color": [
+   244,
+   226,
+   214
+  ]
+ },
+ "big_storms": [
+  {
+   "lat": -28,
+   "lon": 120,
+   "size": 0.02,
+   "aspect": 1.5,
+   "turns": 1.1,
+   "spin": 1,
+   "core": 0.6,
+   "core_size": 0.5,
+   "core_color": [
+    235,
+    225,
+    200
+   ],
+   "ragged": 0.2,
+   "arms": 2,
+   "arm_length": 2.6,
+   "arm_width": 0.2,
+   "arm_curl": 1.1,
+   "arm_strength": 0.8
+  }
+ ],
+ "blur": 0.75,
+ "normal_strength": 6.0
+}

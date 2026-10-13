@@ -1,0 +1,227 @@
+{
+ "name": "NeptuneStorm",
+ "seed": 29631,
+ "steps": 100,
+ "keyframes": 4,
+ "files": {
+  "color": "NeptuneStorm_color.dds",
+  "normal": "NeptuneStorm_normal.dds",
+  "flow": "GiantFlow/NeptuneStorm_flow.truecolor"
+ },
+ "bands": [
+  [
+   -90,
+   [
+    86,
+    138,
+    188
+   ]
+  ],
+  [
+   -55,
+   [
+    93,
+    148,
+    199
+   ]
+  ],
+  [
+   -27,
+   [
+    92,
+    153,
+    207
+   ]
+  ],
+  [
+   -20,
+   [
+    70,
+    148,
+    224
+   ]
+  ],
+  [
+   -14,
+   [
+    38,
+    141,
+    236
+   ]
+  ],
+  [
+   -7,
+   [
+    84,
+    154,
+    248
+   ]
+  ],
+  [
+   -1,
+   [
+    36,
+    140,
+    236
+   ]
+  ],
+  [
+   4,
+   [
+    90,
+    156,
+    249
+   ]
+  ],
+  [
+   10,
+   [
+    40,
+    143,
+    236
+   ]
+  ],
+  [
+   16,
+   [
+    70,
+    150,
+    224
+   ]
+  ],
+  [
+   24,
+   [
+    93,
+    153,
+    206
+   ]
+  ],
+  [
+   50,
+   [
+    91,
+    147,
+    198
+   ]
+  ],
+  [
+   68,
+   [
+    86,
+    139,
+    189
+   ]
+  ]
+ ],
+ "band_blend": 3.0,
+ "edges": [
+  {
+   "lat": 34,
+   "spin": 1,
+   "width": 0.005,
+   "curl": 0.08
+  },
+  {
+   "lat": 16,
+   "spin": -1,
+   "width": 0.0045,
+   "curl": 0.25
+  },
+  {
+   "lat": 10,
+   "spin": 1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": 4,
+   "spin": -1,
+   "width": 0.0042,
+   "curl": 0.45
+  },
+  {
+   "lat": -1,
+   "spin": 1,
+   "width": 0.0042,
+   "curl": 0.45
+  },
+  {
+   "lat": -7,
+   "spin": -1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": -14,
+   "spin": 1,
+   "width": 0.0045,
+   "curl": 0.25
+  },
+  {
+   "lat": -36,
+   "spin": -1,
+   "width": 0.005,
+   "curl": 0.08
+  }
+ ],
+ "curl_strength": 7.5,
+ "curl_spacing": 8.0,
+ "jets": 0.1,
+ "turbulence": 0.00032,
+ "edge_wobble": 3.0,
+ "polar_calm": [
+  60,
+  76
+ ],
+ "polar_smooth": [
+  50,
+  64
+ ],
+ "storms": {
+  "count": 0
+ },
+ "big_storms": [
+  {
+   "lat": -23.4,
+   "lon": 220,
+   "size": 0.022,
+   "aspect": 1.6,
+   "turns": 1.1,
+   "spin": -1,
+   "core": 0.65,
+   "core_size": 0.55,
+   "core_color": [
+    30,
+    62,
+    140
+   ],
+   "ragged": 0.2
+  }
+ ],
+ "blur": 0.75,
+ "normal_strength": 6.0,
+ "sub_bands": 0.03,
+ "sub_band_warm": [
+  0,
+  2,
+  6
+ ],
+ "threads": 0.06,
+ "thread_color": [
+  120,
+  170,
+  248
+ ],
+ "mottle": 0.03,
+ "stripes": [
+  0.8,
+  0.3
+ ],
+ "turbulence_scale": 3.0,
+ "preview": {
+  "tilt": -34,
+  "view_lat": -12,
+  "view_lon": 220
+ }
+}
