@@ -4,7 +4,7 @@ from PIL import Image, ImageFilter, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.0'
+APP_VERSION = '1.1.3'
 VERSION = '4'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -65,6 +65,9 @@ DEFAULTS = {
     'bands': [[-90, [140, 148, 186]], [0, [200, 180, 175]], [60, [140, 148, 186]]],
     'band_blend': 3.6,
     'emission': [],
+    'band_shapes': [],
+    'poles': {'north': {'type': 'none'}, 'south': {'type': 'none'}},
+    'heat_glow': {'strength': 0.0},
     'edges': [],
     'curl_strength': 12.0,
     'curl_spacing': 6.5,
@@ -151,6 +154,135 @@ def storm_marks(s, r, th, seed, k, jit=None):
     return core, arms * env * np.float32(s['arm_strength'])
 
 
+POLE = {'type': 'none', 'lat': 76.0, 'sides': 6, 'roundness': 0.3, 'rotation': 0.0, 'jet': 1.0, 'wobble': 0.15,
+        'band': 0.6, 'band_width': 4.0, 'band_color': None, 'turns': 0.8, 'spin': 1,
+        'ring_lat': 80.0, 'count': 8, 'size': 0.011, 'centre': 1, 'cap_lat': 66.0,
+        'cap_color': None, 'texture': 0.8, 'texture_color': None, 'eye': 0.45, 'eye_color': None, 'eye_size': 0.45}
+
+
+def pole_entry(p, south=False):
+    e = copy.deepcopy(POLE)
+    if south:
+        e['count'] = 5
+    e.update({k: copy.deepcopy(v) for k, v in (p if isinstance(p, dict) else {}).items() if k in POLE})
+    e['type'] = str(e['type']).lower()
+    if e['type'] not in ('none', 'hexagon', 'cyclones'):
+        e['type'] = 'none'
+    return e
+
+
+def pole_colours(P, key, e):
+    bands = P['bands']
+    base = np.array((bands[-1] if key == 'north' else bands[0])[1], np.float32)
+    cap = np.array(e['cap_color'], np.float32) if e.get('cap_color') else base
+    tex = np.array(e['texture_color'], np.float32) if e.get('texture_color') else np.clip(cap * 1.15 + 28, 0, 255)
+    band = np.array(e['band_color'], np.float32) if e.get('band_color') else np.clip(cap * 1.15 + 24, 0, 255)
+    eye = np.array(e['eye_color'], np.float32) if e.get('eye_color') else cap * 0.55
+    return cap, tex, band, eye
+
+
+def hex_q(e, c, az):
+    n = max(3, int(e['sides']))
+    a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
+    seg = np.float32(2 * np.pi / n)
+    d = ((az - np.float32(float(e['rotation']) * D)) % seg) - seg / 2
+    rp = a / np.cos(d) ** np.float32(1 - min(max(float(e['roundness']), 0.0), 1.0))
+    return c / rp
+
+
+def pole_cyclones(sgn, e):
+    out = []
+    sg = np.float32(max(float(e['size']), 0.002))
+    if int(e['centre']):
+        out.append((np.array([0, 0, sgn], np.float32), sg * np.float32(1.2)))
+    n = int(e['count'])
+    for k in range(n):
+        lat = sgn * float(e['ring_lat']) * D
+        lon = float(e['rotation']) * D + 2 * np.pi * k / max(n, 1)
+        out.append((np.array(sph(np.float32(lat), np.float32(lon)), np.float32), sg))
+    return out
+
+
+def pole_preview(P, LA, LO, col):
+    for sgn, key in ((1, 'north'), (-1, 'south')):
+        e = pole_entry(P.get('poles', {}).get(key), south=(sgn < 0))
+        if e['type'] == 'none':
+            continue
+        cap, tex, band, eye = pole_colours(P, key, e)
+        capcol = cap + (tex - cap) * np.float32(e['texture']) * np.float32(0.5)
+        c = np.float32(np.pi / 2) - sgn * LA
+        es = np.float32(max(float(e['eye_size']), 0.02))
+        if e['type'] == 'hexagon':
+            a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
+            q = hex_q(e, c, LO)
+            bw = np.float32(max(float(e['band_width']), 0.3) * D) / a
+            sq = np.float32(0.35) * bw
+            inner = ss(1 - bw - sq, 1 - bw + sq, q)
+            wi = 1 - inner
+            wb = np.float32(e['band']) * (inner - ss(1 - sq, 1 + sq, q))
+            col = col * (1 - wi - wb)[..., None] + capcol * wi[..., None] + band * wb[..., None]
+            eyes = [np.exp(-(c / (es * np.float32(0.55) * a)) ** 2)]
+        else:
+            capc = np.float32(max(90.0 - float(e['cap_lat']), 2.0) * D)
+            sd = np.float32(3.0 * D)
+            wi = 1 - ss(capc - sd, capc + sd, c)
+            col = col * (1 - wi)[..., None] + capcol * wi[..., None]
+            X, Y, Z = sph(LA, LO)
+            eyes = []
+            for v, sg in pole_cyclones(sgn, e):
+                r = np.arccos(np.clip(X * v[0] + Y * v[1] + Z * v[2], -1, 1)) / np.float32(2 * np.pi)
+                ring = np.float32(0.5 * min(float(e['texture']), 1.0)) * np.exp(-((r - sg * np.float32(0.8)) / (sg * np.float32(0.3))) ** 2)
+                col = col * (1 - ring)[..., None] + tex * ring[..., None]
+                eyes.append(np.exp(-(r / (es * sg)) ** 2))
+        for w in eyes:
+            w = np.float32(e['eye']) * w
+            col = col * (1 - w)[..., None] + eye * w[..., None]
+    return col
+
+
+HEAT = {'strength': 0.0, 'dim_color': [130, 14, 4], 'bright_color': [255, 120, 28], 'dark': 0.7, 'poles': 0.4, 'patches': 0.3}
+NIGHT_LIGHT = (0.7, 0.2, 0.3)
+
+
+def heat_entry(h):
+    e = copy.deepcopy(HEAT)
+    e.update({k: copy.deepcopy(v) for k, v in (h if isinstance(h, dict) else {}).items() if k in HEAT})
+    for k in ('dim_color', 'bright_color'):
+        if not e[k]:
+            e[k] = list(HEAT[k])
+    return e
+
+
+def has_heat(P):
+    try:
+        return float((P.get('heat_glow') or {}).get('strength', 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def heat_emission(P, col, LA, patch=None):
+    h = heat_entry(P.get('heat_glow'))
+    s = float(h['strength'])
+    if s <= 0:
+        return None
+    w = np.array([0.299, 0.587, 0.114], np.float32)
+    Ls = [float(np.dot(w, np.array(b[1], np.float32))) for b in P['bands']]
+    lo, hi = min(Ls), max(Ls)
+    if hi - lo < 8:
+        t = np.full(col.shape[:2], 0.5, np.float32)
+    else:
+        t = np.clip((np.float32(hi) - col @ w) / np.float32(hi - lo), 0, 1)
+    d = np.float32(min(max(float(h['dark']), 0.0), 1.0))
+    k = (1 - d) + d * t
+    k = k * (1 - np.float32(min(max(float(h['poles']), 0.0), 1.0)) * np.sin(LA) ** 2)
+    if patch is not None:
+        k = k * patch
+    k = np.clip(k, 0, 1).astype(np.float32)
+    dim = np.array(h['dim_color'], np.float32); bri = np.array(h['bright_color'], np.float32)
+    k2 = k * k
+    return (dim + (bri - dim) * k2[..., None]) * (k2 * np.float32(s))[..., None]
+
+
 def emission_entry(em):
     e = dict(EMISSION)
     e.update({k: v for k, v in em.items() if k in EMISSION})
@@ -161,17 +293,76 @@ def sort_bands(P):
     old = P['bands']
     order = sorted(range(len(old)), key=lambda i: old[i][0])
     P['bands'] = [old[i] for i in order]
-    for em in P.get('emission', []):
+    for em in P.get('emission', []) + P.get('band_shapes', []):
         b = em.get('band', -1)
         em['band'] = order.index(b) if 0 <= b < len(order) else -1
+
+
+def shape_entry(sh):
+    pts = []
+    for p in sh.get('points', []):
+        try:
+            pts.append([round(float(p[0]) % 360.0, 2), round(min(max(float(p[1]), 0.0), 3.0), 3)])
+        except (TypeError, ValueError, IndexError):
+            pass
+    return {'band': int(sh.get('band', -1)), 'points': sorted(pts)}
+
+
+def shape_factor(points, lon):
+    lon = np.asarray(lon, np.float32) % np.float32(360)
+    pts = sorted((float(p[0]) % 360.0, float(p[1])) for p in points)
+    if not pts:
+        return np.ones_like(lon)
+    if len(pts) == 1:
+        return np.full_like(lon, pts[0][1])
+    L = np.array([p[0] for p in pts], np.float32); F = np.array([p[1] for p in pts], np.float32)
+    n = len(pts)
+    i0 = (np.searchsorted(L, lon, side='right') - 1) % n
+    i1 = (i0 + 1) % n
+    span = (L[i1] - L[i0]) % np.float32(360)
+    span = np.where(span <= 0, np.float32(360), span)
+    t = np.clip(((lon - L[i0]) % np.float32(360)) / span, 0, 1)
+    t = t * t * (3 - 2 * t)
+    return F[i0] + (F[i1] - F[i0]) * t
+
+
+def band_edges(P, lon):
+    bands = P['bands']
+    n = len(bands)
+    base = [np.float32(b[0]) for b in bands[1:]]
+    shapes = [sh for sh in P.get('band_shapes', []) if 0 <= int(sh.get('band', -1)) < n and sh.get('points')]
+    if not shapes or n < 2:
+        return base
+    E = [np.full(np.shape(lon), e, np.float32) for e in base]
+    for sh in sorted(shapes, key=lambda q: int(q['band'])):
+        k = int(sh['band'])
+        f = np.clip(shape_factor(sh['points'], lon), 0, 3)
+        if k == 0:
+            E[0] = -90 + f * (E[0] + 90)
+        elif k == n - 1:
+            E[n - 2] = 90 - f * (90 - E[n - 2])
+        else:
+            c = (E[k - 1] + E[k]) / 2; h = (E[k] - E[k - 1]) / 2
+            E[k - 1] = c - f * h; E[k] = c + f * h
+    for k in range(1, len(E)):
+        E[k] = np.maximum(E[k], E[k - 1])
+    return [np.clip(e, -90, 90).astype(np.float32) for e in E]
 
 
 def normalize(P):
     P['big_storms'] = [big_storm(b) for b in P.get('big_storms', [])]
     P['emission'] = [emission_entry(e) for e in P.get('emission', [])]
+    P['band_shapes'] = [shape_entry(sh) for sh in P.get('band_shapes', [])]
+    po = P.get('poles') or {}
+    P['poles'] = {'north': pole_entry(po.get('north')), 'south': pole_entry(po.get('south'), south=True)}
+    P['heat_glow'] = heat_entry(P.get('heat_glow'))
     P.pop('glows', None)
     sort_bands(P)
     return P
+
+
+def has_emission(P):
+    return bool(glow_list(P)) or has_heat(P)
 
 
 def glow_list(P):
@@ -208,6 +399,39 @@ def fbm(tabs, x, y, z, t=0, o=4, gain=0.5):
     for i in range(o):
         s = s + a * vn(tabs[(t + i) % 8], x * 2 ** i + 17.3 * i, y * 2 ** i + 5.1 * i, z * 2 ** i + 9.7 * i); n += a; a *= gain
     return (s / n) * 2 - 1
+
+
+def fbm_lod(tabs, x, y, z, g, t=0, o=4, gain=0.5):
+    s = 0; a = 1; n = 0
+    for i in range(o):
+        att = np.exp(-(g * np.float32(2 ** i * 1.4)) ** 2)
+        s = s + a * (0.5 + (vn(tabs[(t + i) % 8], x * 2 ** i + 17.3 * i, y * 2 ** i + 5.1 * i, z * 2 ** i + 9.7 * i) - 0.5) * att); n += a; a *= gain
+    return (s / n) * 2 - 1
+
+
+def footprint(X, Y, Z, nb=None):
+    fw = np.sqrt((np.roll(X, -1, 1) - X) ** 2 + (np.roll(Y, -1, 1) - Y) ** 2 + (np.roll(Z, -1, 1) - Z) ** 2)
+    g = np.maximum(fw, np.roll(fw, 1, 1))
+    up = [X[:1], Y[:1], Z[:1]]; dn = [X[-1:], Y[-1:], Z[-1:]]
+    if nb is not None:
+        if nb[0] is not None:
+            up = list(sph((0.5 - nb[0][1]) * np.float32(np.pi), nb[0][0] * np.float32(2 * np.pi)))
+            up = [u[None, :] for u in up]
+        if nb[1] is not None:
+            dn = list(sph((0.5 - nb[1][1]) * np.float32(np.pi), nb[1][0] * np.float32(2 * np.pi)))
+            dn = [d[None, :] for d in dn]
+    vd = 0
+    for A, u, d in zip((X, Y, Z), up, dn):
+        E = np.concatenate([u, A, d], 0)
+        vd = vd + (E[1:] - E[:-1]) ** 2
+    vd = np.sqrt(vd)
+    return np.maximum(g, np.maximum(vd[1:], vd[:-1]))
+
+
+def box3(a):
+    p = np.concatenate([a[:1], a, a[-1:]], 0)
+    v = (p[:-2] + p[1:-1] + p[2:]) / np.float32(3)
+    return (np.roll(v, 1, 1) + v + np.roll(v, -1, 1)) / np.float32(3)
 
 
 def ss(a, b, x):
@@ -262,6 +486,149 @@ def save_mips(im, path, fmt):
         f.write(bytes(hd) + b''.join(x[128:] for x in lv))
 
 
+def bc_blocks(a):
+    if a.ndim == 2:
+        a = a[..., None]
+    H, W, C = a.shape
+    ph, pw = (-H) % 4, (-W) % 4
+    if ph or pw:
+        a = np.pad(a, ((0, ph), (0, pw), (0, 0)), mode='edge')
+        H, W = a.shape[:2]
+    return a.reshape(H // 4, 4, W // 4, 4, C).transpose(0, 2, 1, 3, 4).reshape(-1, 16, C)
+
+
+def bc4_encode(ch):
+    v = bc_blocks(ch)[..., 0].astype(np.int32)
+    hi = v.max(1); lo = v.min(1)
+    rng = np.maximum(hi - lo, 1)
+    k = np.clip(np.rint((hi[:, None] - v) * 7.0 / rng[:, None]), 0, 7).astype(np.uint64)
+    code = np.where(k == 0, 0, np.where(k == 7, 1, k + 1)).astype(np.uint64)
+    code[hi == lo] = 0
+    bits = np.zeros(len(v), np.uint64)
+    for i in range(16):
+        bits |= code[:, i] << np.uint64(3 * i)
+    out = np.zeros((len(v), 8), np.uint8)
+    out[:, 0] = hi; out[:, 1] = lo
+    for j in range(6):
+        out[:, 2 + j] = ((bits >> np.uint64(8 * j)) & np.uint64(255)).astype(np.uint8)
+    return out
+
+
+def bc5_encode(r, g):
+    return np.concatenate([bc4_encode(r), bc4_encode(g)], 1).tobytes()
+
+
+BC7_W = np.array([0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64], np.float32)
+
+
+def bc7_chunk(px):
+    n = len(px)
+    mean = px.mean(1)
+    d = px - mean[:, None]
+    ax = d.max(1) - d.min(1) + 1e-3
+    for _ in range(4):
+        ax = np.einsum('nki,nk->ni', d, np.einsum('nkj,nj->nk', d, ax))
+        ax /= np.maximum(np.linalg.norm(ax, axis=1, keepdims=True), 1e-6)
+    t = np.einsum('nki,ni->nk', d, ax)
+    e0 = np.clip(mean + t.min(1)[:, None] * ax, 0, 255)
+    e1 = np.clip(mean + t.max(1)[:, None] * ax, 0, 255)
+
+    def quant(e):
+        res = None
+        for p in (0, 1):
+            q = np.clip(np.rint((e - p) / 2.0), 0, 127)
+            err = ((q * 2 + p - e) ** 2).sum(1)
+            if res is None:
+                res = [q, np.full(len(e), p), err]
+            else:
+                m = err < res[2]
+                res = [np.where(m[:, None], q, res[0]), np.where(m, p, res[1]), np.where(m, err, res[2])]
+        return res[0].astype(np.int64), res[1].astype(np.int64)
+    q0, p0 = quant(e0)
+    q1, p1 = quant(e1)
+    E0 = (q0 * 2 + p0[:, None]).astype(np.float32)
+    E1 = (q1 * 2 + p1[:, None]).astype(np.float32)
+    best = None; idx = None
+    for k in range(16):
+        col = np.floor(((64 - BC7_W[k]) * E0 + BC7_W[k] * E1 + 32) / 64)
+        err = ((px - col[:, None, :]) ** 2).sum(2)
+        if best is None:
+            best, idx = err, np.zeros(err.shape, np.int64)
+        else:
+            m = err < best
+            best = np.where(m, err, best); idx = np.where(m, k, idx)
+    sw = idx[:, 0] >= 8
+    q0s = np.where(sw[:, None], q1, q0); q1s = np.where(sw[:, None], q0, q1)
+    p0s = np.where(sw, p1, p0); p1s = np.where(sw, p0, p1)
+    idx = np.where(sw[:, None], 15 - idx, idx)
+    U = np.uint64
+    lo = np.full(n, 0x40, np.uint64)
+    sh = 7
+    for c in range(4):
+        lo |= q0s[:, c].astype(U) << U(sh); sh += 7
+        lo |= q1s[:, c].astype(U) << U(sh); sh += 7
+    lo |= p0s.astype(U) << U(63)
+    hi = p1s.astype(U) | (idx[:, 0].astype(U) << U(1))
+    for i in range(1, 16):
+        hi |= idx[:, i].astype(U) << U(4 + 4 * (i - 1))
+    return np.stack([lo, hi], 1).astype('<u8').tobytes()
+
+
+def bc7_encode(rgba, chunk=131072):
+    px = bc_blocks(rgba)
+    return b''.join(bc7_chunk(px[i:i + chunk].astype(np.float32)) for i in range(0, len(px), chunk))
+
+
+def dds_header(w, h, mips, top_size, fourcc=b'DX10', dxgi=None):
+    hd = bytearray(128)
+    hd[0:4] = b'DDS '
+    struct.pack_into('<7I', hd, 4, 124, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000, h, w, top_size, 0, mips)
+    struct.pack_into('<2I', hd, 76, 32, 0x4)
+    hd[84:88] = fourcc
+    struct.pack_into('<I', hd, 108, 0x401008)
+    if fourcc == b'DX10':
+        hd += struct.pack('<5I', dxgi, 3, 0, 1, 0)
+    return bytes(hd)
+
+
+def save_bc(arr, path, kind):
+    levels = []
+    cur = Image.fromarray(arr)
+    while True:
+        a = np.asarray(cur)
+        if kind == 'BC7':
+            if a.shape[-1] == 3:
+                a = np.concatenate([a, np.full(a.shape[:2] + (1,), 255, np.uint8)], 2)
+            levels.append(bc7_encode(a))
+        else:
+            levels.append(bc5_encode(a[..., 0], a[..., 1]))
+        if cur.size == (1, 1):
+            break
+        cur = cur.resize((max(1, cur.size[0] // 2), max(1, cur.size[1] // 2)), Image.BOX)
+    w, h = arr.shape[1], arr.shape[0]
+    with open(path, 'wb') as f:
+        f.write(dds_header(w, h, len(levels), len(levels[0]), b'DX10', 98 if kind == 'BC7' else 83) + b''.join(levels))
+
+
+def save_colour_dds(c, path, fmt, flip=True):
+    a = np.ascontiguousarray(c[::-1] if flip else c)
+    if fmt == 'BC7':
+        save_bc(a, path, 'BC7')
+    elif fmt == 'DXT5':
+        rgba = np.concatenate([a, np.full(a.shape[:2] + (1,), 255, np.uint8)], 2)
+        save_mips(Image.fromarray(rgba, 'RGBA'), path, 'DXT5')
+    else:
+        save_mips(Image.fromarray(a, 'RGB'), path, 'DXT1')
+
+
+def write_normal_bc5(c, path, strength, flip=True):
+    g8, a8 = normal_channels(c, strength)
+    rg = np.stack([a8, g8, np.zeros_like(g8)], -1)
+    if not flip:
+        rg = np.ascontiguousarray(rg[::-1])
+    save_bc(rg, path, 'BC5')
+
+
 def merge(base, over):
     out = dict(base)
     for k, v in over.items():
@@ -292,14 +659,75 @@ def kf_at(KF, K, tt):
     return KF[i] * (1 - f) + KF[i + 1] * f
 
 
-def trace_step(KF, K, STEPS, n, x, y, dt, rk2=False):
+def has_poles(P):
+    return any(p.get('type', 'none') != 'none' for p in P.get('poles', {}).values())
+
+
+def pole_zone(P):
+    z = 0.0
+    for key in ('north', 'south'):
+        e = pole_entry(P.get('poles', {}).get(key), south=(key == 'south'))
+        if e['type'] == 'hexagon':
+            z = max(z, 90.0 - float(e['lat']) + 2 * float(e['band_width']) + 6)
+        elif e['type'] == 'cyclones':
+            z = max(z, 90.0 - float(e['cap_lat']) + 6)
+            if int(e['count']) > 0:
+                z = max(z, 90.0 - float(e['ring_lat']) + float(e['size']) * 1080 + 6)
+            if int(e['centre']):
+                z = max(z, float(e['size']) * 1300 + 6)
+    return min(z, 90.0)
+
+
+def needs_rk2(P):
+    return bool(P['big_storms']) or any(p.get('type', 'none') != 'none' for p in P.get('poles', {}).values())
+
+
+def over_pole(x, y):
+    lo = y < 0; hi = y > 1
+    if lo.any() or hi.any():
+        flip = lo | hi
+        y = np.where(lo, -y, np.where(hi, 2 - y, y))
+        x = np.where(flip, (x + 0.5) % 1.0, x)
+    return x, y
+
+
+def vel_at(KF, K, tt, x, y):
+    t = tt * (K - 1); i = min(int(t), K - 2); f = np.float32(t - i)
+    a = samp(KF[i], x, y)
+    return a + (samp(KF[i + 1], x, y) - a) * f
+
+
+def trace_step(KF, K, STEPS, n, x, y, dt, rk2=False, adapt=0, W=0, zone=90.0):
+    if adapt:
+        shp = x.shape
+        x = x.ravel(); y = y.ravel()
+        v1 = vel_at(KF, K, n / STEPS, x, y)
+        la = (np.float32(0.5) - y) * np.float32(np.pi)
+        dpx = np.sqrt((v1.real * np.cos(la)) ** 2 + (v1.imag * np.float32(0.5)) ** 2) * dt * np.float32(W)
+        m = np.ceil(np.maximum(dpx / np.float32(adapt), np.abs(v1.real) * dt * np.float32(2 * np.pi / 0.1)))
+        m = np.clip(m, 1, 16).astype(np.int32)
+        m[np.abs(la) < np.float32((90.0 - zone) * D)] = 1
+        del la, dpx
+        for k in np.unique(m):
+            idx = np.nonzero(m == k)[0]
+            xs = x[idx]; ys = y[idx]
+            h = dt / np.float32(k)
+            for j in range(int(k)):
+                t0 = (n - j / float(k)) / STEPS
+                tm = (n - (j + 0.5) / float(k)) / STEPS
+                va = v1[idx] if j == 0 else vel_at(KF, K, t0, xs, ys)
+                xm, ym = over_pole((xs - va.real * h * 0.5) % 1.0, ys - va.imag * h * 0.5)
+                vb = vel_at(KF, K, tm, xm, ym)
+                xs, ys = over_pole((xs - vb.real * h) % 1.0, ys - vb.imag * h)
+            x[idx] = xs; y[idx] = ys
+        return x.reshape(shp), y.reshape(shp)
     if rk2:
         v1 = samp(kf_at(KF, K, n / STEPS), x, y)
-        xm = (x - v1.real * dt * 0.5) % 1.0; ym = np.clip(y - v1.imag * dt * 0.5, 0, 1)
+        xm, ym = over_pole((x - v1.real * dt * 0.5) % 1.0, y - v1.imag * dt * 0.5)
         v = samp(kf_at(KF, K, (n - 0.5) / STEPS), xm, ym)
     else:
         v = samp(kf_at(KF, K, (n - 0.5) / STEPS), x, y)
-    return (x - v.real * dt) % 1.0, np.clip(y - v.imag * dt, 0, 1)
+    return over_pole((x - v.real * dt) % 1.0, y - v.imag * dt)
 
 
 class Clock:
@@ -338,6 +766,23 @@ class Field:
             self.vort.append((la, lo, sg, np.float32(rng.choice([-1, 1]))))
         self.big = [big_storm(b) for b in P['big_storms']]
         self.glow = glow_list(P)
+        self.heat = heat_entry(P.get('heat_glow')) if has_heat(P) else None
+        self.poles = []
+        for sgn, key in ((1, 'north'), (-1, 'south')):
+            e = pole_entry(P.get('poles', {}).get(key), south=(sgn < 0))
+            if e['type'] != 'none':
+                self.poles.append((sgn, key, e, pole_cyclones(sgn, e) if e['type'] == 'cyclones' else []))
+        self.edge_shift = [None] * len(P['edges'])
+        if P.get('band_shapes'):
+            cols = (np.arange(self.VW, dtype=np.float32) + 0.5) / self.VW * 360
+            E = band_edges(P, cols)
+            base = [float(b[0]) for b in P['bands'][1:]]
+            for i, ed in enumerate(P['edges']):
+                near = [k for k, b in enumerate(base) if abs(b - float(ed['lat'])) < 0.75]
+                if near and not np.isscalar(E[near[0]]):
+                    sh = (E[near[0]] - base[near[0]]) / np.float32(360)
+                    if np.abs(sh).max() > 1e-6:
+                        self.edge_shift[i] = sh[None, :].astype(np.float32)
         self.EW =np.float32(P['edge_wobble']) * fbm(T5, self.X * 2, self.Y * 2, self.Z * 2, o=3) * D / np.float32(2 * np.pi)
 
     def vortpsi(self, la0, lo0, sg, turns):
@@ -361,6 +806,33 @@ class Field:
         r = self.big_rv(k)
         return np.float32(s['spin']) * np.float32(s['turns']) * 5.18 * sg * sg * asp * np.exp(-(r / sg) ** 2)
 
+    def polar_psi(self, k):
+        T1, T2, T3, T4, T5 = self.T
+        X, Y, Z, LA, LO = self.X, self.Y, self.Z, self.LA, self.LO
+        out = np.zeros_like(LA)
+        for sgn, key, e, cyc in self.poles:
+            c = np.float32(np.pi / 2) - sgn * LA
+            spin = np.float32(1 if float(e['spin']) >= 0 else -1)
+            if e['type'] == 'hexagon':
+                a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
+                q = hex_q(e, c, LO)
+                wq = np.float32(max(float(e['band_width']), 0.3) * D * 1.3) / a
+                amp = np.float32(0.25 * float(e['jet'])) * a / np.float32(2 * np.pi) * wq
+                out -= spin * amp * np.tanh((q - 1) / wq)
+                if float(e['wobble']):
+                    out += np.float32(float(e['wobble']) * 0.8) * amp * fbm(T1, X * 7 + 4.1, Y * 7, Z * 7 + 2.3, o=3) * np.exp(-((q - 1) / (2.5 * wq)) ** 2)
+                sv = np.float32(0.55) * a / np.float32(2 * np.pi)
+                out += spin * np.float32(float(e['turns']) * 5.18) * sv * sv * np.exp(-((c / np.float32(2 * np.pi)) / sv) ** 2)
+            else:
+                for v, sg in cyc:
+                    r = np.arccos(np.clip(X * v[0] + Y * v[1] + Z * v[2], -1, 1)) / np.float32(2 * np.pi)
+                    out += spin * np.float32(float(e['turns']) * 5.18) * sg * sg * np.exp(-(r / sg) ** 2)
+                if float(e['wobble']):
+                    capc = np.float32(max(90.0 - float(e['cap_lat']), 2.0) * D)
+                    capm = 1 - ss(capc * np.float32(0.85), capc * np.float32(1.1), c)
+                    out += np.float32(float(e['wobble']) * 0.0012) * capm * fbm(T1, X * 6 + 4.1, Y * 6 + 1.7, Z * 6, o=3)
+        return out
+
     def keyframe(self, k):
         P = self.P; T1, T2, T3, T4, T5 = self.T
         X, Y, Z, LA, LO = self.X, self.Y, self.Z, self.LA, self.LO
@@ -370,6 +842,8 @@ class Field:
         for i, ed in enumerate(P['edges']):
             e = ed['lat']; s = ed['spin']; L = ed['width']; r0 = ed['curl']
             en = np.float32(e * np.pi / 180 / (2 * np.pi)) + self.EW
+            if self.edge_shift[i] is not None:
+                en = en + self.edge_shift[i]
             kk = max(6, int(round(np.cos(e * D) / (P['curl_spacing'] * L))))
             ph = 3.2 * fbm(T3, X * 2.4 + i * 3.1, Y * 2.4, Z * 2.4 + i * 1.7, o=3)
             rho = np.clip(r0 + 0.75 * fbm(T4, X * 3.4 + i * 2.3, Y * 3.4 + o * 0.25, Z * 3.4 + i, o=3), 0.0, 0.85)
@@ -408,6 +882,8 @@ class Field:
             for la0, lo0, sg, sgn in self.vort:
                 pn += sgn * self.vortpsi(la0, lo0, sg, P['storms']['turns'])
             psi = (psi + pn) * self.pfade
+        if self.poles:
+            psi = psi + self.polar_psi(k)
         dpdn = np.zeros_like(psi); dpdn[1:-1] = (psi[:-2] - psi[2:]) / (2 * dn)
         de = self.cosv / self.VW
         dpde = (np.roll(psi, -1, 1) - np.roll(psi, 1, 1)) / (2 * de)
@@ -415,7 +891,7 @@ class Field:
         dx = (ue + jet) / self.cosv; dy = -2 * vn_
         return (dx + 1j * dy).astype(np.complex64)
 
-    def color(self, x, y, r0=0, r1=None):
+    def color(self, x, y, r0=0, r1=None, nb=None):
         P = self.P; T1, T2, T3, T4, T5 = self.T; W, H = self.W, self.H
         r1 = H if r1 is None else r1
         lat_all = ((0.5 - (np.arange(H, dtype=np.float32) + 0.5) / H) * np.pi).astype(np.float32)
@@ -448,22 +924,24 @@ class Field:
         thr = fbm(T5, X0 * 1.2, Y0 * 1.2, Z0 * 170, o=2)
         thw = 0.5 + 0.5 * fbm(T1, X0 * 2.5, Y0 * 2.5, Z0 * 12, o=2)
         ZC = P['bands']
+        EG = band_edges(P, x * np.float32(360)) if P.get('band_shapes') else [np.float32(e) for e, _ in ZC[1:]]
         bl = np.float32(P['band_blend']) * (1 + STORM_MIX * mix) if self.big else np.float32(P['band_blend'])
         col = np.empty(b.shape + (3,), np.float32)
         for c in range(3):
             v = np.full(b.shape, ZC[0][1][c], np.float32)
             prev = ZC[0][1][c]
-            for e, cc in ZC[1:]:
-                v += (cc[c] - prev) * ss(np.float32(e) - bl, np.float32(e) + bl, b); prev = cc[c]
+            for e, (_, cc) in zip(EG, ZC[1:]):
+                v += (cc[c] - prev) * ss(e - bl, e + bl, b); prev = cc[c]
             col[..., c] = v
         em = None
         if self.glow:
             em = np.zeros(b.shape + (3,), np.float32)
             nb = len(ZC)
             for i, gc in self.glow:
-                lo_w = 1 if i == 0 else ss(np.float32(ZC[i][0]) - bl, np.float32(ZC[i][0]) + bl, b)
-                hi_w = 0 if i == nb - 1 else ss(np.float32(ZC[i + 1][0]) - bl, np.float32(ZC[i + 1][0]) + bl, b)
+                lo_w = 1 if i == 0 else ss(EG[i - 1] - bl, EG[i - 1] + bl, b)
+                hi_w = 0 if i == nb - 1 else ss(EG[i] - bl, EG[i] + bl, b)
                 em += np.clip(lo_w - hi_w, 0, 1)[..., None] * np.array(gc, np.float32)
+        del EG
         g = sum(a * np.sin(b * f + p) for a, f, p in P['sub_band_waves'])
         g = g * fp
         col = col * (1 + np.float32(P['sub_bands']) * g[..., None]) + np.maximum(g, 0)[..., None] * np.array(P['sub_band_warm'], np.float32)
@@ -474,7 +952,42 @@ class Field:
         col = col * (1 - tl[..., None]) + np.array(P['thread_color'], np.float32) * tl[..., None]
         if em is not None:
             em *= (m * (1 - tl))[..., None]
+        if self.poles:
+            tts = {}
+            gfp = footprint(X0, Y0, Z0, nb)
+            for sgn, key, e, cyc in self.poles:
+                cap, tex, band, eye = pole_colours(P, key, e)
+                c0 = np.float32(np.pi / 2) - sgn * la0
+                fq = 9.0 if e['type'] == 'hexagon' else 15.0
+                if fq not in tts:
+                    tts[fq] = np.clip(0.5 + 1.2 * fbm_lod(T2, X0 * fq + 1.3, Y0 * fq, Z0 * fq, gfp * np.float32(fq), o=4), 0, 1)
+                capcol = cap + (tex - cap) * (np.float32(e['texture']) * tts[fq])[..., None]
+                if e['type'] == 'hexagon':
+                    a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
+                    q = hex_q(e, c0, lo0)
+                    bw = np.float32(max(float(e['band_width']), 0.3) * D) / a
+                    sq = np.float32(0.35) * bw
+                    inner = ss(1 - bw - sq, 1 - bw + sq, q)
+                    wi = 1 - inner
+                    wb = np.float32(e['band']) * (inner - ss(1 - sq, 1 + sq, q))
+                else:
+                    capc = np.float32(max(90.0 - float(e['cap_lat']), 2.0) * D)
+                    cw = c0 * (1 + np.float32(0.18) * fbm(T4, X0 * 5 + 2.2, Y0 * 5, Z0 * 5, o=3))
+                    sd = np.float32(3.0 * D)
+                    wi = 1 - ss(capc - sd, capc + sd, cw)
+                    wb = np.zeros_like(wi)
+                col = col * (1 - wi - wb)[..., None] + capcol * wi[..., None] + band * wb[..., None]
+                if em is not None:
+                    em *= (1 - wi - wb)[..., None]
+            zc = np.float32((90.0 - pole_zone(P)) * D)
+            wst = np.clip((gfp / np.float32(2 * np.pi / W) - 4) / 8, 0, 1) * (np.abs(LAf) > zc)
+            if wst.any():
+                col = col + (box3(box3(col)) - col) * wst[..., None]
+            del tts, gfp, wst
         del thr, thw, tl, fp, m, mix
+        hp = None
+        if self.heat and float(self.heat['patches']):
+            hp = np.clip(1 + np.float32(float(self.heat['patches']) * 1.5) * fbm(T3, X0 * 3.3 + 7.7, Y0 * 3.3 + 1.1, Z0 * 3.3, o=3), 0, 2)
         del X0, Y0, Z0, la0, lo0
         st = P['storms']
         cream = np.array(st['core_color'], np.float32)
@@ -494,6 +1007,28 @@ class Field:
             col = col * (1 - w[..., None]) + np.array(bs['core_color'], np.float32) * w[..., None]
             if em is not None:
                 em *= (1 - w)[..., None]
+        for sgn, key, e, cyc in self.poles:
+            if not float(e['eye']):
+                continue
+            cap, tex, band, eye = pole_colours(P, key, e)
+            if e['type'] == 'hexagon':
+                a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
+                cf = np.float32(np.pi / 2) - sgn * LAf
+                ws = [np.exp(-(cf / (np.float32(max(float(e['eye_size']), 0.02)) * np.float32(0.55) * a)) ** 2)]
+            else:
+                ws = []
+                for v, sg in cyc:
+                    r = np.arccos(np.clip(XF * v[0] + YF * v[1] + ZF * v[2], -1, 1))
+                    ws.append(np.exp(-(r / (np.float32(max(float(e['eye_size']), 0.02)) * sg * np.float32(2 * np.pi))) ** 2))
+            for w in ws:
+                w = np.float32(e['eye']) * w
+                col = col * (1 - w[..., None]) + eye * w[..., None]
+                if em is not None:
+                    em *= (1 - w)[..., None]
+        if self.heat:
+            eh = heat_emission(P, col, LAf, hp)
+            em = eh if em is None else em + eh
+            del eh, hp
         col = np.clip(col + 0.5, 0, 255).astype(np.uint8)
         if em is not None:
             em = np.clip(em + 0.5, 0, 255).astype(np.uint8)
@@ -557,15 +1092,21 @@ def write_normal(c, path, strength, flip=True):
     save_mips(Image.fromarray(rgba, 'RGBA'), path, 'DXT5')
 
 
+DDS_BC1 = 'DDS BC1 / DXT1 (KSP default)'
+DDS_BC3 = 'DDS BC3 / DXT5 (with alpha)'
+DDS_BC7 = 'DDS BC7 (best quality)'
+DDS_NM = 'DDS DXT5nm (KSP default)'
+DDS_BC5 = 'DDS BC5 (two-channel)'
+DDS_CODEC = {DDS_BC1: 'DXT1', DDS_BC3: 'DXT5', DDS_BC7: 'BC7'}
 EXPORT_FORMATS = {
-    'color': ['DDS (DXT1, KSP)', 'PNG', 'JPG', 'TGA', 'BMP'],
-    'normal': ['DDS (DXT5nm, KSP)', 'PNG'],
+    'color': [DDS_BC1, DDS_BC3, DDS_BC7, 'PNG', 'JPG', 'TGA', 'BMP'],
+    'normal': [DDS_NM, DDS_BC5, 'PNG'],
     'flow': ['truecolor (EVE)', 'PNG'],
-    'emissive': ['DDS (DXT1, KSP)', 'PNG'],
+    'emissive': [DDS_BC1, DDS_BC3, DDS_BC7, 'PNG'],
     'preview': ['PNG', 'JPG'],
 }
-FMT_EXT = {'DDS (DXT1, KSP)': '.dds', 'DDS (DXT5nm, KSP)': '.dds', 'PNG': '.png', 'JPG': '.jpg', 'TGA': '.tga',
-           'BMP': '.bmp', 'truecolor (EVE)': '.truecolor'}
+FMT_EXT = {DDS_BC1: '.dds', DDS_BC3: '.dds', DDS_BC7: '.dds', DDS_NM: '.dds', DDS_BC5: '.dds', 'PNG': '.png',
+           'JPG': '.jpg', 'TGA': '.tga', 'BMP': '.bmp', 'truecolor (EVE)': '.truecolor'}
 PIL_FMT = {'PNG': 'PNG', 'JPG': 'JPEG', 'TGA': 'TGA', 'BMP': 'BMP'}
 
 
@@ -583,13 +1124,15 @@ def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print)
         path = export_target(folder, base, fmt)
         if kind == 'color':
             if fmt.startswith('DDS'):
-                save_mips(Image.fromarray(np.ascontiguousarray(c[::-1] if flip else c), 'RGB'), path, 'DXT1')
+                save_colour_dds(c, path, DDS_CODEC.get(fmt, 'DXT1'), flip)
             elif fmt == 'JPG':
                 Image.fromarray(c).save(path, 'JPEG', quality=95)
             else:
                 Image.fromarray(c).save(path, PIL_FMT[fmt])
         elif kind == 'normal':
-            if fmt.startswith('DDS'):
+            if fmt == DDS_BC5:
+                write_normal_bc5(c, path, float(P['normal_strength']), flip)
+            elif fmt.startswith('DDS'):
                 write_normal(c, path, float(P['normal_strength']), flip)
             else:
                 g8, a8 = normal_channels(c, float(P['normal_strength']))
@@ -619,7 +1162,7 @@ def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print)
             if size and size != e.shape[1]:
                 e = np.asarray(Image.fromarray(e).resize((size, size // 2), Image.LANCZOS))
             if fmt.startswith('DDS'):
-                save_mips(Image.fromarray(np.ascontiguousarray(e[::-1] if flip else e), 'RGB'), path, 'DXT1')
+                save_colour_dds(e, path, DDS_CODEC.get(fmt, 'DXT1'), flip)
             else:
                 Image.fromarray(e).save(path, 'PNG')
         elif kind == 'preview':
@@ -654,7 +1197,7 @@ def write_flow(KF, P, path):
         f.write(b.getvalue())
 
 
-def render_sphere(tex, S, tilt, vlat, vlon, emis=None):
+def render_sphere(tex, S, tilt, vlat, vlon, emis=None, light=None):
     H, W, _ = tex.shape
     yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
     u = (xx + 0.5) / S * 2 - 1; v = 1 - (yy + 0.5) / S * 2
@@ -667,9 +1210,9 @@ def render_sphere(tex, S, tilt, vlat, vlon, emis=None):
     lat = np.arcsin(np.clip(y3, -1, 1)); lon = np.arctan2(u2, z3) + np.radians(vlon)
     px = ((lon / (2 * np.pi)) % 1 * W).astype(np.int32) % W; py = np.clip(((0.5 - lat / np.pi) * H).astype(np.int32), 0, H - 1)
     c = tex[py, px]
-    L = np.array([0.55, 0.25, 0.8]); L /= np.linalg.norm(L)
+    L = np.array(light or [0.55, 0.25, 0.8], float); L /= np.linalg.norm(L)
     nd = np.clip(u * L[0] + v * L[1] + z * L[2], 0, 1)
-    c = c * (0.18 + 0.95 * nd ** 0.8)[..., None]
+    c = c * ((0.06 if light else 0.18) + 0.95 * nd ** 0.8)[..., None]
     rim = np.exp(-z * 6)[..., None] * np.array([0.35, 0.6, 0.95]) * 0.6
     c = c * (1 - 0.35 * np.exp(-z * 5))[..., None] + rim
     if emis is not None:
@@ -689,7 +1232,7 @@ def write_preview(cimg, P, path, eimg=None):
         em = eimg.astype(np.float32) / 255
     pv = P['preview']
     sheet = Image.new('RGB', (2400, 1200))
-    sheet.paste(render_sphere(tex, 800, pv['tilt'], pv['view_lat'], pv['view_lon'], em), (0, 0))
+    sheet.paste(render_sphere(tex, 800, pv['tilt'], pv['view_lat'], pv['view_lon'], em, NIGHT_LIGHT if has_heat(P) else None), (0, 0))
     sheet.paste(Image.fromarray(cimg).resize((1600, 800), Image.LANCZOS), (800, 0))
     sheet.paste(render_sphere(tex, 400, 0, 75, 0, em), (0, 800))
     sheet.paste(render_sphere(tex, 400, 0, -75, 0, em), (400, 800))
@@ -988,7 +1531,7 @@ def cmd_make(a):
         BR = block_rows(W, H)
         NB = (H + BR - 1) // BR
         xp = os.path.join(wd, 'x.npy'); yp = os.path.join(wd, 'y.npy'); ip = os.path.join(wd, 'img.npy'); ep = os.path.join(wd, 'emis.npy')
-        glows = bool(glow_list(P))
+        glows = has_emission(P)
         emis_png = os.path.join(od, name + '_emissive.png'); emis_dds = os.path.join(od, name + '_emissive.dds')
         if st['stage'] == 'kf':
             for k in range(K):
@@ -1012,7 +1555,9 @@ def cmd_make(a):
             KF = np.stack([np.load(os.path.join(wd, 'kf%d.npy' % k)) for k in range(K)])
             xm = np.load(xp, mmap_mode='r+'); ym = np.load(yp, mmap_mode='r+')
             dt = np.float32(1.0 / STEPS)
-            rk2 = bool(P['big_storms'])
+            rk2 = needs_rk2(P)
+            adapt = 1.0 if has_poles(P) else 0
+            zone = pole_zone(P)
             bi, n = st.get('b', 0), st['n']
             last = -1
             while bi < NB:
@@ -1020,8 +1565,8 @@ def cmd_make(a):
                 x = np.array(xm[r0:r1]); y = np.array(ym[r0:r1])
                 try:
                     while n > 0:
-                        need(clock, res, 'step', (r1 - r0) * W * (2 if rk2 else 1))
-                        x, y = trace_step(KF, K, STEPS, n, x, y, dt, rk2)
+                        need(clock, res, 'step', (r1 - r0) * W * (3 if adapt else 2 if rk2 else 1))
+                        x, y = trace_step(KF, K, STEPS, n, x, y, dt, rk2, adapt, W, zone)
                         n -= 1
                         pct = int(100 * (bi * STEPS + STEPS - n) / (NB * STEPS))
                         if pct != last and pct % 2 == 0:
@@ -1049,7 +1594,11 @@ def cmd_make(a):
                 r0, r1 = bi * BR, min(H, (bi + 1) * BR)
                 need(clock, res, 'color', (r1 - r0) * W)
                 if fld is None: fld = Field(P, W)
-                cb, eb = fld.color(np.array(xm[r0:r1]), np.array(ym[r0:r1]), r0, r1)
+                nb = None
+                if fld.poles:
+                    nb = ((np.array(xm[r0 - 1]), np.array(ym[r0 - 1])) if r0 > 0 else None,
+                          (np.array(xm[r1]), np.array(ym[r1])) if r1 < H else None)
+                cb, eb = fld.color(np.array(xm[r0:r1]), np.array(ym[r0:r1]), r0, r1, nb)
                 im_m[r0:r1] = cb
                 im_m.flush()
                 if em_m is not None:
@@ -1115,10 +1664,10 @@ def cmd_export(a):
     src = os.path.join(OUTROOT, name if a.res == 4096 else '%s_%d' % (name, a.res))
     if not os.path.isfile(os.path.join(src, name + '_color.png')):
         sys.exit('nothing built at %d yet - run make first' % a.res)
-    pick = {'color': {'dds': 'DDS (DXT1, KSP)', 'png': 'PNG', 'jpg': 'JPG', 'tga': 'TGA', 'bmp': 'BMP'},
-            'normal': {'dds': 'DDS (DXT5nm, KSP)', 'png': 'PNG'},
+    pick = {'color': {'dds': DDS_BC1, 'bc1': DDS_BC1, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG', 'jpg': 'JPG', 'tga': 'TGA', 'bmp': 'BMP'},
+            'normal': {'dds': DDS_NM, 'bc5': DDS_BC5, 'png': 'PNG'},
             'flow': {'truecolor': 'truecolor (EVE)', 'png': 'PNG'},
-            'emissive': {'dds': 'DDS (DXT1, KSP)', 'png': 'PNG'},
+            'emissive': {'dds': DDS_BC1, 'bc1': DDS_BC1, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
             'preview': {'png': 'PNG', 'jpg': 'JPG'}}
     jobs = []
     for kind in ('color', 'normal', 'flow', 'emissive', 'preview'):
@@ -1134,7 +1683,7 @@ def cmd_install(a):
     name = P['name']
     src = {'color': name + '_color.dds', 'normal': name + '_normal.dds', 'flow': name + '_flow.truecolor', 'emissive': name + '_emissive.dds'}
     what = [w for w in (a.only.split(',') if a.only else ['color', 'normal', 'flow', 'emissive']) if P['files'].get(w)]
-    if 'emissive' in what and not glow_list(P):
+    if 'emissive' in what and not has_emission(P):
         what.remove('emissive')
     stamp = time.strftime('%Y%m%d_%H%M%S')
     bdir = backup_dir(name, stamp)
@@ -1199,7 +1748,7 @@ def cmd_new(a):
     raw['name'] = a.name
     raw['seed'] = int(hashlib.sha1(a.name.encode()).hexdigest()[:6], 16) % 100000
     raw['files'] = {'color': a.name + '_color.dds', 'normal': a.name + '_normal.dds', 'flow': 'GiantFlow/' + a.name + '_flow.truecolor'}
-    if raw.get('emission'):
+    if raw.get('emission') or has_heat(raw):
         raw['files']['emissive'] = a.name + '_emissive.dds'
     dst = os.path.join(PRESETS, a.name + '.json')
     if os.path.exists(dst) and not a.force: sys.exit('exists: ' + dst)
@@ -1217,10 +1766,10 @@ def main():
     n = sp.add_parser('new'); n.add_argument('name'); n.add_argument('--template', default='Pilgrim46'); n.add_argument('--force', action='store_true')
     f = sp.add_parser('flow'); f.add_argument('settings'); f.add_argument('--install', action='store_true')
     e = sp.add_parser('export'); e.add_argument('preset'); e.add_argument('--to', required=True); e.add_argument('--res', type=int, default=4096)
-    e.add_argument('--color', default='dds', choices=['dds', 'png', 'jpg', 'tga', 'bmp', 'none'])
-    e.add_argument('--normal', default='dds', choices=['dds', 'png', 'none'])
+    e.add_argument('--color', default='dds', choices=['dds', 'bc1', 'bc3', 'bc7', 'png', 'jpg', 'tga', 'bmp', 'none'])
+    e.add_argument('--normal', default='dds', choices=['dds', 'bc5', 'png', 'none'])
     e.add_argument('--flow', default='truecolor', choices=['truecolor', 'png', 'none'])
-    e.add_argument('--emissive', default='dds', choices=['dds', 'png', 'none'])
+    e.add_argument('--emissive', default='dds', choices=['dds', 'bc1', 'bc3', 'bc7', 'png', 'none'])
     e.add_argument('--preview', default='none', choices=['png', 'jpg', 'none'])
     e.add_argument('--size', type=int, default=0); e.add_argument('--no-flip', action='store_true')
     a = ap.parse_args()

@@ -1,0 +1,209 @@
+{
+ "name": "Saturnine",
+ "seed": 618,
+ "steps": 100,
+ "keyframes": 4,
+ "files": {
+  "color": "Saturnine_color.dds",
+  "normal": "Saturnine_normal.dds",
+  "flow": "GiantFlow/Saturnine_flow.truecolor"
+ },
+ "bands": [
+  [
+   -90,
+   [
+    176,
+    160,
+    128
+   ]
+  ],
+  [
+   -64,
+   [
+    196,
+    178,
+    138
+   ]
+  ],
+  [
+   -46,
+   [
+    206,
+    186,
+    142
+   ]
+  ],
+  [
+   -30,
+   [
+    216,
+    196,
+    150
+   ]
+  ],
+  [
+   -16,
+   [
+    226,
+    206,
+    162
+   ]
+  ],
+  [
+   -5,
+   [
+    236,
+    220,
+    178
+   ]
+  ],
+  [
+   6,
+   [
+    232,
+    214,
+    170
+   ]
+  ],
+  [
+   18,
+   [
+    222,
+    202,
+    156
+   ]
+  ],
+  [
+   30,
+   [
+    208,
+    188,
+    144
+   ]
+  ],
+  [
+   44,
+   [
+    192,
+    176,
+    138
+   ]
+  ],
+  [
+   56,
+   [
+    168,
+    160,
+    136
+   ]
+  ],
+  [
+   66,
+   [
+    128,
+    138,
+    140
+   ]
+  ]
+ ],
+ "band_blend": 3.0,
+ "edges": [
+  {
+   "lat": 56,
+   "spin": 1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": 44,
+   "spin": -1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": 30,
+   "spin": 1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": 18,
+   "spin": -1,
+   "width": 0.0045,
+   "curl": 0.4
+  },
+  {
+   "lat": -5,
+   "spin": 1,
+   "width": 0.0045,
+   "curl": 0.4
+  }
+ ],
+ "curl_strength": 9.0,
+ "curl_spacing": 6.5,
+ "jets": 0.18,
+ "turbulence": 0.0005,
+ "edge_wobble": 2.6,
+ "polar_calm": [
+  60,
+  76
+ ],
+ "polar_smooth": [
+  50,
+  64
+ ],
+ "storms": {
+  "count": 4,
+  "lat_range": [
+   -40,
+   44
+  ],
+  "size": [
+   0.003,
+   0.0045
+  ],
+  "turns": 2.2,
+  "core": 0.25,
+  "core_size": 0.3,
+  "core_color": [
+   244,
+   236,
+   214
+  ]
+ },
+ "big_storms": [],
+ "blur": 0.75,
+ "normal_strength": 6.0,
+ "emission": [],
+ "thread_color": [
+  240,
+  230,
+  205
+ ],
+ "poles": {
+  "north": {
+   "type": "hexagon",
+   "lat": 76.0,
+   "roundness": 0.25,
+   "band": 0.5,
+   "band_width": 4.5,
+   "turns": 0.7,
+   "wobble": 0.12,
+   "texture": 0.6,
+   "eye": 0.5,
+   "eye_size": 0.4
+  },
+  "south": {
+   "type": "cyclones",
+   "count": 0,
+   "centre": 1,
+   "size": 0.014,
+   "turns": 0.7,
+   "cap_lat": 74.0,
+   "texture": 0.5,
+   "eye": 0.6,
+   "eye_size": 0.5,
+   "wobble": 0.1
+  }
+ }
+}
