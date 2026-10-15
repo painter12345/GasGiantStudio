@@ -4,7 +4,7 @@ from PIL import Image, ImageFilter, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.3'
+APP_VERSION = '1.1.6'
 VERSION = '4'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -68,6 +68,8 @@ DEFAULTS = {
     'band_shapes': [],
     'poles': {'north': {'type': 'none'}, 'south': {'type': 'none'}},
     'heat_glow': {'strength': 0.0},
+    'storm_chains': [],
+    'rings': {'enabled': False},
     'edges': [],
     'curl_strength': 12.0,
     'curl_spacing': 6.5,
@@ -283,6 +285,216 @@ def heat_emission(P, col, LA, patch=None):
     return (dim + (bri - dim) * k2[..., None]) * (k2 * np.float32(s))[..., None]
 
 
+CHAIN = {'lat': -40.0, 'lat_end': None, 'lon': 0.0, 'length': 360.0, 'count': 10, 'size': 0.012, 'aspect': 1.3,
+         'turns': 1.0, 'spin': 1, 'ragged': 0.15, 'core': 0.55, 'core_size': 0.45, 'core_color': [244, 236, 226], 'jitter': 0.4}
+
+
+def chain_entry(c):
+    e = copy.deepcopy(CHAIN)
+    e.update({k: copy.deepcopy(v) for k, v in (c if isinstance(c, dict) else {}).items() if k in CHAIN})
+    if e['lat_end'] is None:
+        e['lat_end'] = e['lat']
+    e['count'] = max(1, int(e['count']))
+    e['length'] = min(max(float(e['length']), 0.0), 360.0)
+    return e
+
+
+def chain_points(c):
+    c = chain_entry(c)
+    n = c['count']
+    full = c['length'] >= 359.99
+    out = []
+    for i in range(n):
+        t = i / float(n) if full else (i / float(n - 1) if n > 1 else 0.0)
+        lon = c['lon'] + (360.0 if full else c['length']) * t
+        lat = c['lat'] + (c['lat_end'] - c['lat']) * (0.0 if full else t)
+        out.append((lat, lon % 360.0))
+    return out
+
+
+def expand_chains(P):
+    out = []
+    seed = int(P.get('seed', 1))
+    for ci, c in enumerate(P.get('storm_chains', [])):
+        c = chain_entry(c)
+        rng = np.random.default_rng(seed * 31 + 1000 * ci + 7)
+        pts = chain_points(c)
+        n = len(pts)
+        sp = (360.0 / n) if c['length'] >= 359.99 else (c['length'] / max(n - 1, 1))
+        j = float(c['jitter'])
+        for lat, lon in pts:
+            dlon, dlat, ds = rng.uniform(-1, 1, 3)
+            b = {k: copy.deepcopy(c[k]) for k in ('aspect', 'turns', 'spin', 'ragged', 'core', 'core_size', 'core_color')}
+            b.update({'lat': max(-85.0, min(85.0, lat + 1.5 * j * dlat)), 'lon': (lon + 0.3 * j * sp * dlon) % 360.0,
+                      'size': float(c['size']) * (1 + 0.3 * j * ds), 'arms': 0})
+            out.append(big_storm(b))
+    return out
+
+
+def all_big(P):
+    return [big_storm(b) for b in P.get('big_storms', [])] + expand_chains(P)
+
+
+RING = {'enabled': False, 'inner': 1.35, 'outer': 2.3, 'angle': 0.0, 'opacity': 0.85, 'zones': 4, 'ringlets': 0.6,
+        'detail': 1.0, 'edge': 0.3, 'variation': 0.4, 'gaps': [[0.62, 0.035, 1.0], [0.88, 0.008, 0.9]],
+        'inner_color': None, 'middle_color': None, 'outer_color': None, 'size': 2048, 'pattern': 0, 'view': 18.0}
+
+
+def ring_entry(r):
+    e = copy.deepcopy(RING)
+    e.update({k: copy.deepcopy(v) for k, v in (r if isinstance(r, dict) else {}).items() if k in RING})
+    gaps = []
+    for g in e['gaps'] or []:
+        try:
+            gaps.append([min(max(float(g[0]), 0.0), 1.0), min(max(float(g[1]), 0.0005), 0.5), min(max(float(g[2]), 0.0), 1.0)])
+        except (TypeError, ValueError, IndexError):
+            pass
+    e['gaps'] = gaps
+    e['inner'] = max(1.0, float(e['inner']))
+    e['outer'] = max(e['inner'] + 0.05, float(e['outer']))
+    e['size'] = int(e['size']) if int(e['size']) in (1024, 2048, 4096) else 2048
+    return e
+
+
+def has_rings(P):
+    return bool((P.get('rings') or {}).get('enabled'))
+
+
+def ring_colours(P, e):
+    cols = np.array([b[1] for b in P['bands']], np.float32).reshape(-1, 3)
+    m = cols.mean(0)
+    grey = float(np.dot(m, [0.299, 0.587, 0.114]))
+    d = m * 0.55 + grey * 0.45
+    auto = (np.clip(d * 0.78, 0, 255), np.clip(d * 1.05 + 12, 0, 255), np.clip(d * 0.95 + 6, 0, 255))
+    out = []
+    for k, a in zip(('inner_color', 'middle_color', 'outer_color'), auto):
+        out.append(np.array(e[k], np.float32) if e.get(k) else a)
+    return out
+
+
+def noise1d(x, freq, rng):
+    n = int(np.ceil(freq)) + 2
+    v = rng.random(n + 1).astype(np.float32)
+    t = x * np.float32(freq)
+    i = np.floor(t).astype(np.int32)
+    f = t - i
+    f = f * f * (3 - 2 * f)
+    return v[i] * (1 - f) + v[i + 1] * f
+
+
+def fbm1d(x, freq, rng, o=5):
+    s = 0; a = 1.0; n = 0
+    for k in range(o):
+        s = s + a * noise1d(x, freq * 2 ** k, rng); n += a; a *= 0.5
+    return s / n
+
+
+def ring_profile(P, n=2048):
+    e = ring_entry(P.get('rings'))
+    rng = np.random.default_rng(int(P.get('seed', 1)) * 7 + 991 + int(e['pattern']) * 104729)
+    x = ((np.arange(n) + 0.5) / n).astype(np.float32)
+    k = max(1, int(e['zones']))
+    bounds = np.sort(rng.uniform(0.08, 0.92, k - 1))
+    levels = rng.uniform(0.25, 1.0, k)
+    levels = levels / levels.max()
+    dens = np.full(n, levels[0], np.float32)
+    for b, l0, l1 in zip(bounds, levels[:-1], levels[1:]):
+        w = rng.uniform(0.004, 0.03)
+        dens += np.float32(l1 - l0) * ss(np.float32(b - w), np.float32(b + w), x)
+    det = max(float(e['detail']), 0.1)
+    rl = float(e['ringlets'])
+    n1 = fbm1d(x, 60 * det, rng)
+    dens *= np.clip(1 + rl * (2 * n1 - 1) * 1.4, 0, None)
+    for pos, wid, dep in e['gaps']:
+        g = np.exp(-(np.abs(x - pos) / (wid / 2)) ** 6)
+        dens *= 1 - np.float32(dep) * g
+    soft = np.float32(0.002 + float(e['edge']) * 0.04)
+    dens *= ss(np.float32(0), soft, x) * (1 - ss(1 - soft, np.float32(1), x))
+    alpha = np.clip(dens * np.float32(e['opacity']), 0, 1)
+    ci, cm, co = ring_colours(P, e)
+    t = x[:, None]
+    col = np.where(t < 0.5, ci + (cm - ci) * (t / 0.5), cm + (co - cm) * ((t - 0.5) / 0.5))
+    n2 = fbm1d(x, 25 * det, rng)
+    col = col * (1 + float(e['variation']) * 0.35 * (2 * n2 - 1))[:, None]
+    col = col * (0.85 + 0.15 * np.clip(dens, 0, 1))[:, None]
+    return np.clip(col, 0, 255).astype(np.float32), alpha.astype(np.float32)
+
+
+def ring_image(P, n=None, h=16):
+    e = ring_entry(P.get('rings'))
+    col, a = ring_profile(P, n or e['size'])
+    rgba = np.concatenate([col, (a * 255)[:, None]], 1)[::-1]
+    return np.repeat((rgba + 0.5).clip(0, 255).astype(np.uint8)[None], h, 0)
+
+
+def ring_scene(tex, col, alpha, e, w=560, h=300, light=(0.75, -0.45, 0.5), ss_=2):
+    W, Hh = w * ss_, h * ss_
+    el = np.radians(max(2.0, min(89.0, float(e.get('view', 18.0)))))
+    ang = np.radians(float(e.get('angle', 0.0)))
+    ro = float(e['outer']); ri = float(e['inner'])
+    half_w = ro * 1.06
+    half_h = max(1.06, ro * np.sin(el) * 1.06 + 0.1)
+    sc = min(W / (2 * half_w), Hh / (2 * half_h))
+    xs = (np.arange(W) + 0.5 - W / 2) / sc
+    ys = (Hh / 2 - np.arange(Hh) - 0.5) / sc
+    X, Yv = np.meshgrid(xs.astype(np.float32), ys.astype(np.float32))
+    c = np.array([0, -np.cos(el), np.sin(el)], np.float32)
+    up = np.array([0, np.sin(el), np.cos(el)], np.float32)
+    O = X[..., None] * np.array([1, 0, 0], np.float32) + Yv[..., None] * up + 10 * c
+    d = -c
+    L = np.array(light, np.float32); L /= np.linalg.norm(L)
+    nr = np.array([0, -np.sin(ang), np.cos(ang)], np.float32)
+    b = O @ d
+    cc = (O * O).sum(-1) - 1
+    disc = b * b - cc
+    hit_s = disc >= 0
+    ts = -b - np.sqrt(np.maximum(disc, 0))
+    tr = -(O @ nr) / float(d @ nr)
+    Q = O + tr[..., None] * d
+    rq = np.sqrt((Q * Q).sum(-1))
+    n = len(alpha)
+
+    def ring_at(r):
+        u = (r - ri) / (ro - ri)
+        inside = (u >= 0) & (u <= 1)
+        i = np.clip((u * n).astype(np.int32), 0, n - 1)
+        return inside, i
+    in_r, ir = ring_at(rq)
+    a_r = np.where(in_r, alpha[ir], 0)
+    bg = np.array([13, 15, 20], np.float32)
+    out = np.broadcast_to(bg, X.shape + (3,)).copy()
+    S = O + ts[..., None] * d
+    Hs, Ws = tex.shape[:2]
+    lat = np.arcsin(np.clip(S[..., 2], -1, 1))
+    lon = np.arctan2(S[..., 1], S[..., 0])
+    py = np.clip(((0.5 - lat / np.pi) * Hs).astype(np.int32), 0, Hs - 1)
+    px = ((lon / (2 * np.pi)) % 1 * Ws).astype(np.int32) % Ws
+    shade = np.clip(S @ L, 0, 1) * 0.95 + 0.04
+    tl = -(S @ nr) / max(abs(float(L @ nr)), 1e-4) * np.sign(float(L @ nr))
+    Qs = S + tl[..., None] * L
+    in_s, isd = ring_at(np.sqrt((Qs * Qs).sum(-1)))
+    shade = shade * np.where((tl > 0) & in_s, 1 - 0.85 * alpha[isd], 1)
+    planet = tex[py, px].astype(np.float32) * shade[..., None]
+    out[hit_s] = planet[hit_s]
+    bq = Q @ L
+    cq = (Q * Q).sum(-1) - 1
+    dq = bq * bq - cq
+    shadowed = (dq > 0) & (-bq - np.sqrt(np.maximum(dq, 0)) > 0)
+    rl = (0.25 + 0.75 * abs(float(L @ nr))) * np.where(shadowed, 0.12, 1.0)
+    rc = col[ir] * rl[..., None]
+    front = in_r & (~hit_s | (tr < ts))
+    out = np.where(front[..., None], rc * a_r[..., None] + out * (1 - a_r[..., None]), out)
+    img = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+    return img.resize((w, h), Image.LANCZOS) if ss_ > 1 else img
+
+
+def ring_snippet(P, path):
+    e = ring_entry(P.get('rings'))
+    return ('Rings\n{\n\tRing\n\t{\n\t\tinnerRadius = %d\n\t\touterRadius = %d\n\t\tangle = %s\n'
+            '\t\ttexture = %s\n\t\tcolor = 1,1,1,1\n\t\tlockRotation = false\n\t\tuseNewShader = true\n\t}\n}\n') % (
+        round(e['inner'] * 1000), round(e['outer'] * 1000), ('%g' % float(e['angle'])), path)
+
+
 def emission_entry(em):
     e = dict(EMISSION)
     e.update({k: v for k, v in em.items() if k in EMISSION})
@@ -356,6 +568,8 @@ def normalize(P):
     po = P.get('poles') or {}
     P['poles'] = {'north': pole_entry(po.get('north')), 'south': pole_entry(po.get('south'), south=True)}
     P['heat_glow'] = heat_entry(P.get('heat_glow'))
+    P['storm_chains'] = [chain_entry(c) for c in P.get('storm_chains', [])]
+    P['rings'] = ring_entry(P.get('rings'))
     P.pop('glows', None)
     sort_bands(P)
     return P
@@ -387,10 +601,12 @@ def vn(T, x, y, z):
     fx = x - xi; fy = y - yi; fz = z - zi
     fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz)
     x0 = xi % N; y0 = yi % N; z0 = zi % N; x1 = (x0 + 1) % N; y1 = (y0 + 1) % N; z1 = (z0 + 1) % N
-    c00 = T[x0, y0, z0] * (1 - fx) + T[x1, y0, z0] * fx
-    c10 = T[x0, y1, z0] * (1 - fx) + T[x1, y1, z0] * fx
-    c01 = T[x0, y0, z1] * (1 - fx) + T[x1, y0, z1] * fx
-    c11 = T[x0, y1, z1] * (1 - fx) + T[x1, y1, z1] * fx
+    F = T.reshape(-1)
+    a0 = x0 * (N * N); a1 = x1 * (N * N); b0 = y0 * N; b1 = y1 * N
+    c00 = F[a0 + b0 + z0] * (1 - fx) + F[a1 + b0 + z0] * fx
+    c10 = F[a0 + b1 + z0] * (1 - fx) + F[a1 + b1 + z0] * fx
+    c01 = F[a0 + b0 + z1] * (1 - fx) + F[a1 + b0 + z1] * fx
+    c11 = F[a0 + b1 + z1] * (1 - fx) + F[a1 + b1 + z1] * fx
     return (c00 * (1 - fy) + c10 * fy) * (1 - fz) + (c01 * (1 - fy) + c11 * fy) * fz
 
 
@@ -679,7 +895,7 @@ def pole_zone(P):
 
 
 def needs_rk2(P):
-    return bool(P['big_storms']) or any(p.get('type', 'none') != 'none' for p in P.get('poles', {}).values())
+    return bool(P['big_storms']) or bool(P.get('storm_chains')) or any(p.get('type', 'none') != 'none' for p in P.get('poles', {}).values())
 
 
 def over_pole(x, y):
@@ -764,7 +980,7 @@ class Field:
         for k in range(int(st['count'])):
             la = np.float32(rng.uniform(*st['lat_range']) * D); lo = np.float32(rng.uniform(0, 2 * np.pi)); sg = np.float32(rng.uniform(*st['size']))
             self.vort.append((la, lo, sg, np.float32(rng.choice([-1, 1]))))
-        self.big = [big_storm(b) for b in P['big_storms']]
+        self.big = all_big(P)
         self.glow = glow_list(P)
         self.heat = heat_entry(P.get('heat_glow')) if has_heat(P) else None
         self.poles = []
@@ -772,6 +988,8 @@ class Field:
             e = pole_entry(P.get('poles', {}).get(key), south=(sgn < 0))
             if e['type'] != 'none':
                 self.poles.append((sgn, key, e, pole_cyclones(sgn, e) if e['type'] == 'cyclones' else []))
+        self.edge_static = {}
+        self.polar_cache = None
         self.edge_shift = [None] * len(P['edges'])
         if P.get('band_shapes'):
             cols = (np.arange(self.VW, dtype=np.float32) + 0.5) / self.VW * 360
@@ -845,9 +1063,11 @@ class Field:
             if self.edge_shift[i] is not None:
                 en = en + self.edge_shift[i]
             kk = max(6, int(round(np.cos(e * D) / (P['curl_spacing'] * L))))
-            ph = 3.2 * fbm(T3, X * 2.4 + i * 3.1, Y * 2.4, Z * 2.4 + i * 1.7, o=3)
+            if i not in self.edge_static:
+                self.edge_static[i] = (3.2 * fbm(T3, X * 2.4 + i * 3.1, Y * 2.4, Z * 2.4 + i * 1.7, o=3),
+                                       np.float32(L) * (1 + 0.45 * fbm(T2, X * 2.6 + i * 1.9, Y * 2.6, Z * 2.6 + i * 0.7, o=2)))
+            ph, Lf = self.edge_static[i]
             rho = np.clip(r0 + 0.75 * fbm(T4, X * 3.4 + i * 2.3, Y * 3.4 + o * 0.25, Z * 3.4 + i, o=3), 0.0, 0.85)
-            Lf = np.float32(L) * (1 + 0.45 * fbm(T2, X * 2.6 + i * 1.9, Y * 2.6, Z * 2.6 + i * 0.7, o=2))
             xi = (self.nlat - en) / Lf
             th = kk * LO + ph
             win = np.exp(-(xi / np.float32(P['curl_window'])) ** 2)
@@ -883,7 +1103,9 @@ class Field:
                 pn += sgn * self.vortpsi(la0, lo0, sg, P['storms']['turns'])
             psi = (psi + pn) * self.pfade
         if self.poles:
-            psi = psi + self.polar_psi(k)
+            if self.polar_cache is None:
+                self.polar_cache = self.polar_psi(k)
+            psi = psi + self.polar_cache
         dpdn = np.zeros_like(psi); dpdn[1:-1] = (psi[:-2] - psi[2:]) / (2 * dn)
         de = self.cosv / self.VW
         dpde = (np.roll(psi, -1, 1) - np.roll(psi, 1, 1)) / (2 * de)
@@ -1035,6 +1257,66 @@ class Field:
         return col, em
 
 
+FLOW_KEYS = ('seed', 'steps', 'keyframes', 'edges', 'curl_strength', 'curl_spacing', 'curl_window', 'jets', 'turbulence',
+             'turbulence_scale', 'edge_wobble', 'polar_calm', 'band_shapes')
+POLE_FLOW = ('type', 'lat', 'sides', 'roundness', 'rotation', 'jet', 'wobble', 'band_width', 'turns', 'spin', 'ring_lat',
+             'count', 'size', 'centre', 'cap_lat')
+
+
+def flow_key(P):
+    d = {k: P.get(k) for k in FLOW_KEYS}
+    d['band_lats'] = sorted(float(b[0]) for b in P['bands'])
+    st = P.get('storms', {})
+    d['storms'] = [st.get(k) for k in ('count', 'lat_range', 'size', 'turns')]
+    d['big'] = [[b.get(k) for k in ('lat', 'lon', 'size', 'aspect', 'turns', 'spin', 'ragged')] for b in all_big(P)]
+    d['poles'] = {}
+    for key in ('north', 'south'):
+        e = pole_entry(P.get('poles', {}).get(key), south=(key == 'south'))
+        d['poles'][key] = [e[k] for k in POLE_FLOW] if e['type'] != 'none' else 'none'
+    return json.dumps(d, sort_keys=True, default=str)
+
+
+class Cancelled(Exception):
+    pass
+
+
+def live_map(P, W, cache=None, cancel=None):
+    H = W // 2
+    fld = Field(P, W)
+    key = (flow_key(P), W)
+    xy = cache.get(key) if cache is not None else None
+    if xy is None:
+        K = int(P['keyframes'])
+        KF = []
+        for k in range(K):
+            if cancel:
+                cancel()
+            KF.append(fld.keyframe(k))
+        KF = np.stack(KF)
+        STEPS = int(P['steps'])
+        LA, LO = grid(W, H)
+        x = (LO / (2 * np.pi)).astype(np.float32); y = (0.5 - LA / np.pi).astype(np.float32)
+        dt = np.float32(1.0 / STEPS)
+        rk2 = needs_rk2(P); adapt = 1.0 if has_poles(P) else 0; zone = pole_zone(P)
+        for n in range(STEPS, 0, -1):
+            if cancel and n % 5 == 0:
+                cancel()
+            x, y = trace_step(KF, K, STEPS, n, x, y, dt, rk2, adapt, W, zone)
+        del KF
+        xy = (x, y)
+        if cache is not None:
+            cache[key] = xy
+            while len(cache) > 6:
+                cache.pop(next(iter(cache)))
+    if cancel:
+        cancel()
+    c, e = fld.color(xy[0], xy[1])
+    c = finish_blur(c, P, W)
+    if e is not None:
+        e = finish_blur(e, P, W)
+    return c, e
+
+
 def finish_blur(img, P, W):
     p = 16
     im = Image.fromarray(np.concatenate([img[:, -p:], img, img[:, :p]], 1), 'RGB').filter(ImageFilter.GaussianBlur(P['blur'] * W / 4096))
@@ -1104,6 +1386,7 @@ EXPORT_FORMATS = {
     'flow': ['truecolor (EVE)', 'PNG'],
     'emissive': [DDS_BC1, DDS_BC3, DDS_BC7, 'PNG'],
     'preview': ['PNG', 'JPG'],
+    'ring': [DDS_BC3, DDS_BC7, 'PNG'],
 }
 FMT_EXT = {DDS_BC1: '.dds', DDS_BC3: '.dds', DDS_BC7: '.dds', DDS_NM: '.dds', DDS_BC5: '.dds', 'PNG': '.png',
            'JPG': '.jpg', 'TGA': '.tga', 'BMP': '.bmp', 'truecolor (EVE)': '.truecolor'}
@@ -1165,6 +1448,18 @@ def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print)
                 save_colour_dds(e, path, DDS_CODEC.get(fmt, 'DXT1'), flip)
             else:
                 Image.fromarray(e).save(path, 'PNG')
+        elif kind == 'ring':
+            rp = os.path.join(src_dir, name + '_ring.png')
+            if not os.path.isfile(rp):
+                log('no ring texture in this build - skipped')
+                continue
+            r = np.asarray(Image.open(rp).convert('RGBA'))
+            if fmt == DDS_BC7:
+                save_bc(np.ascontiguousarray(r), path, 'BC7')
+            elif fmt.startswith('DDS'):
+                save_mips(Image.fromarray(r, 'RGBA'), path, 'DXT5')
+            else:
+                Image.fromarray(r, 'RGBA').save(path, 'PNG')
         elif kind == 'preview':
             pp = os.path.join(src_dir, name + '_preview.png')
             if not os.path.isfile(pp):
@@ -1639,6 +1934,11 @@ def cmd_make(a):
                 for f in (emis_png, emis_dds):
                     if os.path.isfile(f):
                         os.remove(f)
+            ring_png = os.path.join(od, name + '_ring.png')
+            if has_rings(P):
+                Image.fromarray(ring_image(P), 'RGBA').save(ring_png)
+            elif os.path.isfile(ring_png):
+                os.remove(ring_png)
             st = {'stage': 'preview'}; save_state(); clock.log('dds files done')
         if st['stage'] == 'preview':
             need(clock, res, 'preview')
@@ -1668,9 +1968,10 @@ def cmd_export(a):
             'normal': {'dds': DDS_NM, 'bc5': DDS_BC5, 'png': 'PNG'},
             'flow': {'truecolor': 'truecolor (EVE)', 'png': 'PNG'},
             'emissive': {'dds': DDS_BC1, 'bc1': DDS_BC1, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
-            'preview': {'png': 'PNG', 'jpg': 'JPG'}}
+            'preview': {'png': 'PNG', 'jpg': 'JPG'},
+            'ring': {'dds': DDS_BC3, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'}}
     jobs = []
-    for kind in ('color', 'normal', 'flow', 'emissive', 'preview'):
+    for kind in ('color', 'normal', 'flow', 'emissive', 'preview', 'ring'):
         f = getattr(a, kind)
         if f and f != 'none':
             jobs.append((kind, '%s_%s' % (name, kind), pick[kind][f]))
@@ -1681,10 +1982,13 @@ def cmd_install(a):
     P, raw = load_preset(a.preset)
     od = out_dir(P, a.res)
     name = P['name']
-    src = {'color': name + '_color.dds', 'normal': name + '_normal.dds', 'flow': name + '_flow.truecolor', 'emissive': name + '_emissive.dds'}
-    what = [w for w in (a.only.split(',') if a.only else ['color', 'normal', 'flow', 'emissive']) if P['files'].get(w)]
+    src = {'color': name + '_color.dds', 'normal': name + '_normal.dds', 'flow': name + '_flow.truecolor', 'emissive': name + '_emissive.dds',
+           'ring': name + '_ring.png'}
+    what = [w for w in (a.only.split(',') if a.only else ['color', 'normal', 'flow', 'emissive', 'ring']) if P['files'].get(w)]
     if 'emissive' in what and not has_emission(P):
         what.remove('emissive')
+    if 'ring' in what and not has_rings(P):
+        what.remove('ring')
     stamp = time.strftime('%Y%m%d_%H%M%S')
     bdir = backup_dir(name, stamp)
     if not texture_dir():
@@ -1698,7 +2002,10 @@ def cmd_install(a):
             os.makedirs(bdir, exist_ok=True)
             shutil.copy2(dst, os.path.join(bdir, os.path.basename(dst)))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(os.path.join(od, src[w]), dst)
+        if w == 'ring' and dst.lower().endswith('.dds'):
+            save_mips(Image.open(os.path.join(od, src[w])).convert('RGBA'), dst, 'DXT5')
+        else:
+            shutil.copyfile(os.path.join(od, src[w]), dst)
         print('installed', w, '->', nice(dst))
     if os.path.isdir(bdir): print('backup ->', nice(bdir))
 
@@ -1771,6 +2078,7 @@ def main():
     e.add_argument('--flow', default='truecolor', choices=['truecolor', 'png', 'none'])
     e.add_argument('--emissive', default='dds', choices=['dds', 'bc1', 'bc3', 'bc7', 'png', 'none'])
     e.add_argument('--preview', default='none', choices=['png', 'jpg', 'none'])
+    e.add_argument('--ring', default='dds', choices=['dds', 'bc3', 'bc7', 'png', 'none'])
     e.add_argument('--size', type=int, default=0); e.add_argument('--no-flip', action='store_true')
     a = ap.parse_args()
     r = {'make': cmd_make, 'install': cmd_install, 'sample': cmd_sample, 'new': cmd_new, 'flow': cmd_flow, 'export': cmd_export}[a.cmd](a)

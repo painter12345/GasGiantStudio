@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.1.6
+
+- Rings: a new Rings tab makes a ring texture for Kopernicus. Inner and outer edge, tilt,
+  wide zones, fine ringlets, ringlet detail, opacity, soft edges, colour variation, a list
+  of gaps (with "Random gaps"), inner/middle/outer colours (auto from the bands), texture
+  width, "New pattern" and "Randomize rings". The tab shows the planet with its rings,
+  including the planet's shadow on the rings and the rings' shadow on the planet, and the
+  Kopernicus config to copy. Build writes the ring texture; Export saves it as DDS
+  (BC3/DXT5 or BC7) or PNG; there is a file name for it on the Planet tab. Command line:
+  `export --ring dds|bc7|png|none`.
+- Storm chains: rows of storms along a latitude, like Jupiter's "string of pearls". Each
+  chain has latitude (and end latitude), longitude, length (360 = all the way round),
+  count, size, stretch, turns, spin, ragged, centre and jitter.
+- Edit on the map: a tool row above the preview with Turn globe, Place storms, Storm
+  chain and Move bands. Draw a chain by dragging along a latitude, or click for a ring all
+  the way round; drag a chain to move it, right-click to remove it. Move bands: drag a
+  band edge up or down, and the curl row on that edge comes along; double-click splits a
+  band, right-click an edge removes it. Undo works for all of it.
+- Saturnine now has rings.
+- Fixed: lists that became empty (for example the big storms after loading a planet
+  without any) left a big blank space in the tab.
+- Planets without rings or storm chains come out exactly as before.
+
+## 1.1.5
+
+- New colour picker for every colour box (bands, glow, storms, poles, threads): a colour
+  square and hue bar, hex and R/G/B fields, a before/now comparison, the planet's band
+  colours and your recent colours as one-click swatches.
+- Eyedropper: "Pick from screen" lets you click a colour anywhere on your screen, for
+  example in a Jupiter photo open in your browser, with a magnifier and the hex value
+  under the cursor. "Pick from picture..." does the same with an image file. It takes the
+  average of 3 x 3 pixels so noisy photos give a clean colour.
+- The planet and the live preview update while you pick; Cancel puts the old colour back,
+  and Undo goes back after OK.
+- Place big storms by clicking: turn on "Place storms" above the preview (or "Place on the
+  map" under the big storms) and click the flat map or the globe to add a big storm there.
+  Drag a storm to move it, right-click it to remove it; dashed outlines show where the
+  storms are. Undo works for all of it.
+
+## 1.1.4
+
+- Live preview: the preview now shows the real swirls by itself a moment after each
+  change, with storms, poles and glow. A quick rough version comes first, then a sharper
+  one at 512 or 1024 pixels wide (pick next to the "Swirls" tickbox). Colour changes
+  reuse the flow and show in about half a second. Untick "Swirls" for the old bands-only
+  view. It waits while a build runs.
+- Drag the globe in the live preview to turn it; double-click resets. This only turns the
+  view, the preview camera in the Planet tab stays as it is.
+- The flow field is computed about twice as fast, so every build starts sooner. The maps
+  come out exactly the same as before.
+
 ## 1.1.3
 
 - Night-side glow (Bands tab): a heat glow over the whole planet for hot Jupiters. Darker

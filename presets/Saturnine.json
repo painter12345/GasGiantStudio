@@ -6,7 +6,8 @@
  "files": {
   "color": "Saturnine_color.dds",
   "normal": "Saturnine_normal.dds",
-  "flow": "GiantFlow/Saturnine_flow.truecolor"
+  "flow": "GiantFlow/Saturnine_flow.truecolor",
+  "ring": "Saturnine_ring.dds"
  },
  "bands": [
   [
@@ -205,5 +206,29 @@
    "eye_size": 0.5,
    "wobble": 0.1
   }
+ },
+ "rings": {
+  "enabled": true,
+  "inner": 1.25,
+  "outer": 2.3,
+  "zones": 4,
+  "ringlets": 0.55,
+  "detail": 1.0,
+  "opacity": 0.85,
+  "edge": 0.25,
+  "variation": 0.4,
+  "gaps": [
+   [
+    0.6,
+    0.04,
+    1.0
+   ],
+   [
+    0.9,
+    0.008,
+    0.9
+   ]
+  ],
+  "view": 16
  }
 }

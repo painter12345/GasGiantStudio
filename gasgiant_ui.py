@@ -1,8 +1,8 @@
-import os, sys, json, copy, queue, random, threading, subprocess
+import os, sys, json, copy, queue, random, threading, subprocess, time, colorsys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import numpy as np
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 try:
     import PIL._tkinter_finder
 except Exception:
@@ -13,6 +13,7 @@ import gasgiant as gg
 
 GEN = os.path.join(gg.TOOL, 'gasgiant.py')
 RES = ['512', '1024', '2048', '4096', '8192', '16384']
+LIVE_RES = ['512', '1024']
 RES_INFO = {'512': 'about 10 s', '1024': 'about 30 s', '2048': 'about 1\u20132 min',
             '4096': 'about 4 min', '8192': 'about 20\u201340 min', '16384': 'about 1\u20133 hours'}
 BG = '#1b1f27'
@@ -116,8 +117,7 @@ def band_image(P, w, h):
     if gg.has_poles(P):
         img = gg.pole_preview({'bands': bands, 'poles': P.get('poles', {})}, np.radians(LA).astype(np.float32),
                               np.radians(LO).astype(np.float32), img.astype(np.float32))
-    for k, s in enumerate(P.get('big_storms', [])):
-        s = gg.big_storm(s)
+    for k, s in enumerate(gg.all_big(P)):
         r, th = gg.storm_polar(s, np.radians(LA).astype(np.float32), np.radians(LO).astype(np.float32), P.get('seed', 1), k)
         wgt, arm = gg.storm_marks(s, r, th, P.get('seed', 1), k)
         if arm is not None:
@@ -165,6 +165,13 @@ def pole_disc(img, sgn, size, cmax=32.0):
     alpha = np.clip((1 - rr) * size / 2, 0, 1)[..., None]
     c = c * alpha + np.array([13, 15, 20], np.float32) * (1 - alpha)
     return Image.fromarray(np.clip(c, 0, 255).astype(np.uint8))
+
+
+def sheet_font(size):
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
 
 
 def band_labels(bands):
@@ -312,6 +319,365 @@ class Slider:
             self.notify()
 
 
+def sv_image(h, n=256):
+    c = np.array(colorsys.hsv_to_rgb(h, 1.0, 1.0), np.float32)
+    sat = np.linspace(0, 1, n, dtype=np.float32)[None, :, None]
+    val = np.linspace(1, 0, n, dtype=np.float32)[:, None, None]
+    img = val * ((1 - sat) + sat * c[None, None, :])
+    return Image.fromarray((img * 255 + 0.5).astype(np.uint8))
+
+
+def hue_image(w=26, n=256):
+    rows = np.array([colorsys.hsv_to_rgb(y / float(n), 1.0, 1.0) for y in range(n)], np.float32)
+    return Image.fromarray((np.repeat(rows[:, None, :], w, 1) * 255 + 0.5).astype(np.uint8))
+
+
+def recent_colours():
+    out = []
+    for c in load_settings().get('recent_colours', []):
+        try:
+            v = [int(max(0, min(255, x))) for x in c][:3]
+            if len(v) == 3:
+                out.append(v)
+        except (TypeError, ValueError):
+            pass
+    return out[:14]
+
+
+def remember_colour(rgb):
+    S = load_settings()
+    rc = [list(rgb)] + [c for c in recent_colours() if list(c) != list(rgb)]
+    S['recent_colours'] = rc[:14]
+    save_settings(S)
+
+
+class PixelPicker(tk.Toplevel):
+    Z = 11
+
+    def __init__(self, master, img, done, fullscreen=False):
+        super().__init__(master)
+        self.img = img
+        self.arr = np.asarray(img).astype(np.float32)
+        self.done = done
+        self.finished = False
+        self.configure(bg='black')
+        iw, ih = img.size
+        if fullscreen:
+            self.overrideredirect(True)
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry('%dx%d+0+0' % (sw, sh))
+            dw, dh = sw, sh
+        else:
+            self.title('Click a colour in the picture')
+            sc = min(1100.0 / iw, 760.0 / ih, 1.0 if max(iw, ih) > 300 else 4.0)
+            dw, dh = max(1, int(iw * sc)), max(1, int(ih * sc))
+        self.sx, self.sy = iw / float(dw), ih / float(dh)
+        disp = img.resize((dw, dh), Image.LANCZOS) if (dw, dh) != (iw, ih) else img
+        self.tkimg = ImageTk.PhotoImage(disp)
+        self.cv = tk.Canvas(self, width=dw, height=dh, bg='black', highlightthickness=0, cursor='crosshair')
+        self.cv.pack()
+        self.cv.create_image(0, 0, image=self.tkimg, anchor='nw')
+        self.loupe_img = None
+        self.lp = self.cv.create_image(0, 0, anchor='nw')
+        self.lbox = self.cv.create_rectangle(0, 0, 0, 0, outline='white', width=2)
+        self.lfr = self.cv.create_rectangle(0, 0, 0, 0, outline='white', width=1)
+        self.ltxt_bg = self.cv.create_rectangle(0, 0, 0, 0, fill='#101318', outline='')
+        self.ltxt = self.cv.create_text(0, 0, anchor='nw', fill='white', font=(MONO, 10))
+        self.cv.create_rectangle(dw // 2 - 210, 2, dw // 2 + 210, 28, fill='#101318', outline=LINE)
+        self.cv.create_text(dw // 2, 15, text='Click a colour  \u00b7  Esc or right-click = cancel', fill='white',
+                            font=(FONT, 11, 'bold'))
+        self.cv.bind('<Motion>', self.move)
+        self.cv.bind('<Button-1>', self.click)
+        self.cv.bind('<Button-3>', lambda e: self.close(None))
+        self.bind('<Escape>', lambda e: self.close(None))
+        self.protocol('WM_DELETE_WINDOW', lambda: self.close(None))
+        self.after(50, self.take_focus)
+
+    def take_focus(self):
+        try:
+            self.lift()
+            self.focus_force()
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    def at(self, x, y):
+        H, W = self.arr.shape[:2]
+        return min(max(int(x * self.sx), 0), W - 1), min(max(int(y * self.sy), 0), H - 1)
+
+    def colour(self, ix, iy):
+        H, W = self.arr.shape[:2]
+        a = self.arr[max(iy - 1, 0):min(iy + 2, H), max(ix - 1, 0):min(ix + 2, W)]
+        return [int(round(v)) for v in a.reshape(-1, 3).mean(0)]
+
+    def move(self, e):
+        ix, iy = self.at(e.x, e.y)
+        r = self.Z // 2
+        H, W = self.arr.shape[:2]
+        ys = np.clip(np.arange(iy - r, iy + r + 1), 0, H - 1)
+        xs = np.clip(np.arange(ix - r, ix + r + 1), 0, W - 1)
+        crop = self.arr[ys][:, xs].astype(np.uint8)
+        big = Image.fromarray(crop).resize((self.Z * 10, self.Z * 10), Image.NEAREST)
+        self.loupe_img = ImageTk.PhotoImage(big)
+        cw, ch = int(self.cv.cget('width')), int(self.cv.cget('height'))
+        lx = e.x + 24 if e.x + 24 + 110 < cw else e.x - 24 - 110
+        ly = e.y + 24 if e.y + 24 + 140 < ch else e.y - 24 - 140
+        self.cv.itemconfigure(self.lp, image=self.loupe_img)
+        self.cv.coords(self.lp, lx, ly)
+        self.cv.coords(self.lfr, lx, ly, lx + 110, ly + 110)
+        self.cv.coords(self.lbox, lx + 50, ly + 50, lx + 60, ly + 60)
+        c = self.colour(ix, iy)
+        self.cv.coords(self.ltxt_bg, lx, ly + 112, lx + 110, ly + 134)
+        self.cv.coords(self.ltxt, lx + 6, ly + 115)
+        self.cv.itemconfigure(self.ltxt, text=hexcol(c))
+        for it in (self.lp, self.lfr, self.lbox, self.ltxt_bg, self.ltxt):
+            self.cv.tag_raise(it)
+
+    def click(self, e):
+        self.close(self.colour(*self.at(e.x, e.y)))
+
+    def close(self, rgb):
+        if self.finished:
+            return
+        self.finished = True
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+        self.done(rgb)
+
+
+class ColourPicker(tk.Toplevel):
+    def __init__(self, app, initial, title, live=None):
+        super().__init__(app)
+        self.app = app
+        self.live = live
+        self.result = None
+        self.title(title)
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app)
+        self.initial = [int(round(float(v))) for v in initial][:3]
+        self.rgb = list(self.initial)
+        self.h, self.s, self.v = colorsys.rgb_to_hsv(*[c / 255.0 for c in self.rgb])
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill='both')
+        self.sv = tk.Canvas(body, width=256, height=256, highlightthickness=1, highlightbackground=LINE, cursor='crosshair', bg=BG)
+        self.sv.grid(row=0, column=0, sticky='n')
+        self.hue = tk.Canvas(body, width=26, height=256, highlightthickness=1, highlightbackground=LINE, cursor='sb_v_double_arrow', bg=BG)
+        self.hue.grid(row=0, column=1, sticky='n', padx=(8, 14))
+        self.hue_tk = ImageTk.PhotoImage(hue_image())
+        self.hue.create_image(0, 0, image=self.hue_tk, anchor='nw')
+        self.hue_mark = self.hue.create_rectangle(0, 0, 27, 4, outline='white', width=2)
+        self.sv_img = self.sv.create_image(0, 0, anchor='nw')
+        self.sv_mark = self.sv.create_oval(0, 0, 0, 0, outline='white', width=2)
+        self.sv_mark2 = self.sv.create_oval(0, 0, 0, 0, outline='black', width=1)
+        for ev in ('<Button-1>', '<B1-Motion>'):
+            self.sv.bind(ev, self.sv_click)
+            self.hue.bind(ev, self.hue_click)
+        right = ttk.Frame(body)
+        right.grid(row=0, column=2, sticky='n')
+        self.cmp = tk.Canvas(right, width=150, height=56, highlightthickness=1, highlightbackground=LINE, bg=BG)
+        self.cmp.grid(row=0, column=0, columnspan=4, sticky='w')
+        self.cmp_old = self.cmp.create_rectangle(0, 0, 75, 57, outline='')
+        self.cmp_new = self.cmp.create_rectangle(75, 0, 151, 57, outline='')
+        self.cmp.tag_bind(self.cmp_old, '<Button-1>', lambda e: self.set_rgb(self.initial))
+        ttk.Label(right, text='before          now', style='Dim.TLabel').grid(row=1, column=0, columnspan=4, sticky='w', pady=(2, 8))
+        ttk.Label(right, text='Hex').grid(row=2, column=0, sticky='w')
+        self.hexv = tk.StringVar()
+        he = ttk.Entry(right, textvariable=self.hexv, width=9)
+        he.grid(row=2, column=1, columnspan=3, sticky='w', pady=2)
+        he.bind('<Return>', self.hex_typed)
+        he.bind('<FocusOut>', self.hex_typed)
+        self.chv = []
+        for i, nm in enumerate('RGB'):
+            ttk.Label(right, text=nm).grid(row=3 + i, column=0, sticky='w')
+            v = tk.StringVar()
+            sp = ttk.Spinbox(right, textvariable=v, from_=0, to=255, increment=1, width=6, command=self.ch_typed)
+            sp.grid(row=3 + i, column=1, columnspan=3, sticky='w', pady=2)
+            sp.bind('<Return>', self.ch_typed)
+            sp.bind('<FocusOut>', self.ch_typed)
+            self.chv.append(v)
+        ttk.Button(right, text='Pick from screen', command=self.pick_screen).grid(row=6, column=0, columnspan=4, sticky='ew', pady=(12, 3))
+        ttk.Button(right, text='Pick from picture\u2026', command=self.pick_picture).grid(row=7, column=0, columnspan=4, sticky='ew')
+        low = ttk.Frame(self, padding=(12, 0, 12, 12))
+        low.pack(fill='x')
+        bands = sorted(app.P.get('bands', []), key=lambda b: b[0])
+        self.swatch_row(low, 'This planet', [b[1] for b in bands], 0)
+        self.swatch_row(low, 'Recent', recent_colours(), 1)
+        bar = ttk.Frame(low)
+        bar.grid(row=2, column=0, columnspan=2, sticky='e', pady=(10, 0))
+        ttk.Button(bar, text='Cancel', command=self.cancel).pack(side='right')
+        ttk.Button(bar, text='OK', style='Accent.TButton', command=self.ok).pack(side='right', padx=6)
+        self.bind('<Escape>', lambda e: self.cancel())
+        self.bind('<Return>', lambda e: self.ok() if not isinstance(self.focus_get(), (ttk.Entry, ttk.Spinbox)) else None)
+        self.protocol('WM_DELETE_WINDOW', self.cancel)
+        self.draw_sv()
+        self.refresh(notify=False)
+        self.update_idletasks()
+        try:
+            x = app.winfo_rootx() + max(0, (app.winfo_width() - self.winfo_reqwidth()) // 2)
+            y = app.winfo_rooty() + max(0, (app.winfo_height() - self.winfo_reqheight()) // 3)
+            self.geometry('+%d+%d' % (x, y))
+        except tk.TclError:
+            pass
+        self.grab_set()
+        self.focus_set()
+
+    def swatch_row(self, parent, label, cols, row):
+        ttk.Label(parent, text=label, style='Dim.TLabel', width=11).grid(row=row, column=0, sticky='w', pady=(6, 0))
+        fr = ttk.Frame(parent)
+        fr.grid(row=row, column=1, sticky='w', pady=(6, 0))
+        if not cols:
+            ttk.Label(fr, text='\u2013', style='Dim.TLabel').pack(side='left')
+        for c in cols[:14]:
+            c = [int(round(float(v))) for v in c][:3]
+            lab = tk.Label(fr, bg=hexcol(c), width=2, relief='solid', bd=1, cursor='hand2')
+            lab.pack(side='left', padx=(0, 3))
+            lab.bind('<Button-1>', lambda e, c=c: self.set_rgb(c))
+
+    def draw_sv(self):
+        self.sv_tk = ImageTk.PhotoImage(sv_image(self.h))
+        self.sv.itemconfigure(self.sv_img, image=self.sv_tk)
+
+    def refresh(self, notify=True):
+        x, y = self.s * 255, (1 - self.v) * 255
+        self.sv.coords(self.sv_mark, x - 6, y - 6, x + 6, y + 6)
+        self.sv.coords(self.sv_mark2, x - 7, y - 7, x + 7, y + 7)
+        hy = self.h * 255
+        self.hue.coords(self.hue_mark, 1, hy - 3, 27, hy + 3)
+        self.cmp.itemconfigure(self.cmp_old, fill=hexcol(self.initial))
+        self.cmp.itemconfigure(self.cmp_new, fill=hexcol(self.rgb))
+        self.hexv.set(hexcol(self.rgb))
+        for v, c in zip(self.chv, self.rgb):
+            v.set(str(c))
+        if notify and self.live:
+            self.live(list(self.rgb))
+
+    def from_hsv(self):
+        self.rgb = [int(round(c * 255)) for c in colorsys.hsv_to_rgb(self.h, self.s, self.v)]
+        self.refresh()
+
+    def set_rgb(self, rgb):
+        self.rgb = [int(max(0, min(255, round(float(c))))) for c in rgb][:3]
+        h, s, v = colorsys.rgb_to_hsv(*[c / 255.0 for c in self.rgb])
+        if s > 0 and v > 0:
+            if abs(h - self.h) > 1e-4:
+                self.h = h
+                self.draw_sv()
+        self.s, self.v = s, v
+        self.refresh()
+
+    def sv_click(self, e):
+        self.s = min(max(e.x / 255.0, 0.0), 1.0)
+        self.v = 1 - min(max(e.y / 255.0, 0.0), 1.0)
+        self.from_hsv()
+
+    def hue_click(self, e):
+        self.h = min(max(e.y / 256.0, 0.0), 0.999)
+        self.draw_sv()
+        self.from_hsv()
+
+    def hex_typed(self, _e=None):
+        t = self.hexv.get().strip().lstrip('#')
+        if len(t) == 3:
+            t = ''.join(ch * 2 for ch in t)
+        try:
+            if len(t) != 6:
+                raise ValueError
+            c = [int(t[i:i + 2], 16) for i in (0, 2, 4)]
+        except ValueError:
+            self.hexv.set(hexcol(self.rgb))
+            return
+        if c != self.rgb:
+            self.set_rgb(c)
+
+    def ch_typed(self, _e=None):
+        try:
+            c = [int(round(float(v.get().replace(',', '.')))) for v in self.chv]
+        except ValueError:
+            self.refresh(notify=False)
+            return
+        c = [max(0, min(255, x)) for x in c]
+        if c != self.rgb:
+            self.set_rgb(c)
+
+    def picked(self, rgb):
+        try:
+            self.deiconify()
+            self.lift()
+            self.grab_set()
+            self.focus_set()
+        except tk.TclError:
+            return
+        if rgb:
+            self.set_rgb(rgb)
+
+    def pick_screen(self):
+        try:
+            from PIL import ImageGrab
+        except Exception as ex:
+            messagebox.showerror('Pick from screen', 'Screen capture is not available here.\n%s' % ex, parent=self)
+            return
+        self.grab_release()
+        self.withdraw()
+
+        def grab():
+            try:
+                img = ImageGrab.grab().convert('RGB')
+            except Exception as ex:
+                self.picked(None)
+                messagebox.showerror('Pick from screen', 'Could not capture the screen.\n%s' % ex, parent=self)
+                return
+            PixelPicker(self, img, self.picked, fullscreen=True)
+        self.after(250, grab)
+
+    def pick_picture(self):
+        path = filedialog.askopenfilename(parent=self, title='Picture to pick a colour from',
+                                          filetypes=[('Pictures', '*.png *.jpg *.jpeg *.bmp *.tga *.webp *.dds'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            img = Image.open(path).convert('RGB')
+        except Exception as ex:
+            messagebox.showerror('Could not open picture', str(ex), parent=self)
+            return
+        self.grab_release()
+        PixelPicker(self, img, self.picked, fullscreen=False)
+
+    def ok(self):
+        self.ch_typed()
+        self.result = list(self.rgb)
+        self.grab_release()
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
+
+def pick_colour(app, initial, title='Pick a colour', live=None, restore=None):
+    snap = getattr(app, 'snapshot', None)
+    if snap:
+        snap()
+    dlg = ColourPicker(app, initial, title, live)
+    app.wait_window(dlg)
+    res = dlg.result
+    same = res is not None and list(res) == [int(round(float(v))) for v in initial][:3]
+    if res is None or same:
+        if snap and app.history:
+            app.history.pop()
+            if not app.history:
+                app.undo_btn.configure(state='disabled')
+        if restore:
+            restore()
+        return None
+    remember_colour(res)
+    return res
+
+
 class Swatch:
     def __init__(self, app, parent, path):
         self.app, self.path = app, path
@@ -323,11 +689,18 @@ class Swatch:
         self.lab.configure(bg=hexcol(getp(self.app.P, self.path)))
 
     def pick(self, _e=None):
-        c = colorchooser.askcolor(color=hexcol(getp(self.app.P, self.path)), parent=self.app)
-        if c and c[0]:
-            setp(self.app.P, self.path, [int(round(x)) for x in c[0]])
+        old = copy.deepcopy(getp(self.app.P, self.path))
+
+        def live(v):
+            setp(self.app.P, self.path, v)
             self.refresh()
             self.app.changed()
+
+        def restore():
+            live(old)
+        c = pick_colour(self.app, old, live=live, restore=restore)
+        if c:
+            live(c)
 
 
 def num(label, key, lo, hi, inc, fmt, default=0.0, isint=False, width=7):
@@ -373,6 +746,7 @@ class ListEditor:
     def rebuild(self):
         for w in self.body.winfo_children():
             w.destroy()
+        self.body.configure(height=1, width=1)
         items = self.items_fn()
         if not self.card:
             if items:
@@ -402,12 +776,21 @@ class ListEditor:
             lab = tk.Label(parent, bg=hexcol(f['get'](item)), width=6, relief='solid', bd=1, cursor='hand2')
 
             def pick(_e=None, lab=lab):
-                c = colorchooser.askcolor(color=hexcol(f['get'](item)), parent=self.app)
-                if c and c[0]:
-                    v = [int(round(x)) for x in c[0]]
+                old = copy.deepcopy(f['get'](item))
+
+                def live(v):
                     f['set'](item, v)
-                    lab.configure(bg=hexcol(v))
+                    try:
+                        lab.configure(bg=hexcol(v))
+                    except tk.TclError:
+                        pass
                     self.notify()
+
+                def restore():
+                    live(old)
+                c = pick_colour(self.app, old, live=live, restore=restore)
+                if c:
+                    live(c)
             lab.bind('<Button-1>', pick)
             return lab
         if kind == 'choice':
@@ -704,6 +1087,7 @@ class PoleEditor:
         self.var.set(dict(POLE_TYPES)[e['type']])
         for w in self.body.winfo_children():
             w.destroy()
+        self.body.configure(height=1, width=1)
         if e['type'] == 'none':
             return
         fields = self.HEX if e['type'] == 'hexagon' else self.CYC
@@ -724,11 +1108,20 @@ class PoleEditor:
         lab.pack(side='left')
 
         def pick(_e=None):
-            c = colorchooser.askcolor(color=hexcol(item.get(k) or auto), parent=self.app)
-            if c and c[0]:
-                item[k] = [int(round(x)) for x in c[0]]
-                self.refresh()
+            old = copy.deepcopy(item.get(k))
+
+            def live(v):
+                item[k] = v
+                lab.configure(bg=hexcol(v))
                 self.app.changed()
+
+            def restore():
+                item[k] = old
+            c = pick_colour(self.app, old or [int(round(float(x))) for x in auto], live=live, restore=restore)
+            if c:
+                item[k] = c
+            self.refresh()
+            self.app.changed()
 
         def reset():
             item[k] = None
@@ -836,7 +1229,7 @@ class SampleWin(tk.Toplevel):
 
 
 class ExportDialog(tk.Toplevel):
-    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('preview', 'Preview sheet'))
+    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'), ('preview', 'Preview sheet'))
     SIZES = ['Same as build', '16384 \u00d7 8192', '8192 \u00d7 4096', '4096 \u00d7 2048', '2048 \u00d7 1024', '1024 \u00d7 512']
 
     def __init__(self, app, builds):
@@ -869,7 +1262,7 @@ class ExportDialog(tk.Toplevel):
         ttk.Label(f, text='File name', style='Dim.TLabel').grid(row=3, column=1, sticky='w', pady=(12, 2))
         ttk.Label(f, text='Format', style='Dim.TLabel').grid(row=3, column=2, sticky='w', pady=(12, 2))
         self.rows = {}
-        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'preview': False}
+        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'ring': True, 'preview': False}
         for i, (k, lab) in enumerate(self.KINDS):
             on = tk.BooleanVar(value=self.S.get('on_' + k, defaults[k]))
             chk = ttk.Checkbutton(f, text=lab, variable=on)
@@ -884,20 +1277,21 @@ class ExportDialog(tk.Toplevel):
             note = ttk.Label(f, text='', style='Dim.TLabel')
             note.grid(row=4 + i, column=3, sticky='w', padx=(6, 0))
             self.rows[k] = (on, chk, v_name, v_fmt, note)
-        ttk.Label(f, text='Size').grid(row=9, column=0, sticky='w', pady=(12, 4))
+        nk = 4 + len(self.KINDS)
+        ttk.Label(f, text='Size').grid(row=nk, column=0, sticky='w', pady=(12, 4))
         self.v_size = tk.StringVar(value=self.S.get('size') if self.S.get('size') in self.SIZES else self.SIZES[0])
-        ttk.Combobox(f, textvariable=self.v_size, values=self.SIZES, width=14, state='readonly').grid(row=9, column=1, sticky='w', pady=(12, 4))
+        ttk.Combobox(f, textvariable=self.v_size, values=self.SIZES, width=14, state='readonly').grid(row=nk, column=1, sticky='w', pady=(12, 4))
         self.v_flip = tk.BooleanVar(value=self.S.get('flip', True))
-        ttk.Checkbutton(f, text='Flip DDS files upside down (KSP needs this)', variable=self.v_flip).grid(row=10, column=0, columnspan=3, sticky='w', pady=4)
+        ttk.Checkbutton(f, text='Flip DDS files upside down (KSP needs this)', variable=self.v_flip).grid(row=nk + 1, column=0, columnspan=3, sticky='w', pady=4)
         ttk.Label(f, text='Which DDS?  Colour and emissive maps: BC1 / DXT1 is what KSP uses by default, BC7 looks '
                           'best but the file is twice as big, BC3 / DXT5 if you need an alpha channel.  Normal map: '
                           'DXT5nm for KSP\u2019s own planet shaders, BC5 for shaders that ask for it.  BC5 and BC7 '
                           'need a texture loader that reads them, such as KSPTextureLoader.',
-                  style='Dim.TLabel', wraplength=640, justify='left').grid(row=11, column=0, columnspan=4, sticky='w', pady=(8, 0))
+                  style='Dim.TLabel', wraplength=640, justify='left').grid(row=nk + 2, column=0, columnspan=4, sticky='w', pady=(8, 0))
         self.stat = ttk.Label(f, text='', style='Dim.TLabel', wraplength=640, justify='left')
-        self.stat.grid(row=12, column=0, columnspan=4, sticky='w', pady=(10, 0))
+        self.stat.grid(row=nk + 3, column=0, columnspan=4, sticky='w', pady=(10, 0))
         bar = ttk.Frame(f)
-        bar.grid(row=13, column=0, columnspan=4, sticky='e', pady=(14, 0))
+        bar.grid(row=nk + 4, column=0, columnspan=4, sticky='e', pady=(14, 0))
         self.open_btn = ttk.Button(bar, text='Open folder', command=lambda: open_folder(self.v_dir.get()), state='disabled')
         self.open_btn.pack(side='left', padx=(0, 6))
         self.go_btn = ttk.Button(bar, text='Export', style='Accent.TButton', command=self.go)
@@ -923,6 +1317,7 @@ class ExportDialog(tk.Toplevel):
         has = {'color': True, 'normal': True,
                'flow': os.path.isfile(os.path.join(src, self.name + '_flow.truecolor')),
                'emissive': os.path.isfile(os.path.join(src, self.name + '_emissive.png')),
+               'ring': os.path.isfile(os.path.join(src, self.name + '_ring.png')),
                'preview': os.path.isfile(os.path.join(src, self.name + '_preview.png'))}
         for k, (on, chk, v_name, v_fmt, note) in self.rows.items():
             if has[k]:
@@ -1503,7 +1898,28 @@ class App(tk.Tk):
         self.view = tk.StringVar(value='bands')
         self.bands_fn = lambda: self.P['bands']
         self.history = []
+        st = load_settings()
+        self.live_on = tk.BooleanVar(value=bool(st.get('live_swirls', True)))
+        self.live_size = tk.StringVar(value=str(st.get('live_size', 512)) if str(st.get('live_size', 512)) in LIVE_RES else '512')
+        self.live_lock = threading.Lock()
+        self.live_q = queue.Queue()
+        self.live_cache = {}
+        self.live_gen = 0
+        self.live_req = None
+        self.live_thread = None
+        self.live_last = None
+        self.live_after = None
+        self.live_err = None
+        self.live_view = None
+        self.rot = [0.0, 0.0]
+        self.drag = None
+        self.sdrag = None
+        self.map_tool = tk.StringVar(value='turn')
+        self.cdrag = None
+        self.bdrag = None
+        self.view_geom = None
         self.build_ui()
+        self.after(150, self.live_poll)
         self.bind('<Control-z>', self.undo)
         names = self.preset_names()
         if names:
@@ -1560,17 +1976,35 @@ class App(tk.Tk):
         self.tab_detail()
         self.tab_storms()
         self.tab_poles()
+        self.tab_rings()
         self.tab_body()
         vb = ttk.Frame(right)
         vb.pack(fill='x')
-        for val, txt in (('bands', 'Bands (instant)'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
+        for val, txt in (('bands', 'Live preview'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
             ttk.Radiobutton(vb, text=txt, value=val, variable=self.view, style='Toolbutton',
                             command=self.update_view).pack(side='left', padx=(0, 4))
+        ttk.Checkbutton(vb, text='Swirls', variable=self.live_on, command=self.toggle_live).pack(side='left', padx=(10, 4))
+        lcb = ttk.Combobox(vb, textvariable=self.live_size, values=LIVE_RES, width=5, state='readonly')
+        lcb.pack(side='left', padx=(0, 8))
+        lcb.bind('<<ComboboxSelected>>', self.live_size_changed)
+        self.live_lab = ttk.Label(vb, text='', style='Dim.TLabel')
+        self.live_lab.pack(side='left')
         self.export_btn = ttk.Button(vb, text='Export…', command=self.export)
         self.export_btn.pack(side='right')
+        tb = ttk.Frame(right)
+        tb.pack(fill='x', pady=(6, 0))
+        ttk.Label(tb, text='On the map', style='Dim.TLabel').pack(side='left', padx=(0, 8))
+        for val, txt in (('turn', 'Turn globe'), ('storms', 'Place storms'), ('chain', 'Storm chain'), ('bands', 'Move bands')):
+            ttk.Radiobutton(tb, text=txt, value=val, variable=self.map_tool, style='Toolbutton',
+                            command=self.tool_changed).pack(side='left', padx=(0, 4))
         self.canvas = tk.Canvas(right, bg='#0d0f14', highlightthickness=1, highlightbackground=LINE)
         self.canvas.pack(fill='both', expand=True, pady=(8, 8))
         self.canvas.bind('<Configure>', lambda e: self.schedule_redraw())
+        self.canvas.bind('<ButtonPress-1>', self.drag_start)
+        self.canvas.bind('<B1-Motion>', self.drag_move)
+        self.canvas.bind('<ButtonRelease-1>', self.drag_end)
+        self.canvas.bind('<Double-Button-1>', self.drag_reset)
+        self.canvas.bind('<Button-3>', self.storm_remove_click)
         sb = ttk.Frame(right)
         sb.pack(fill='x')
         ttk.Label(sb, text='Resolution', style='Dim.TLabel').pack(side='left')
@@ -1687,6 +2121,16 @@ class App(tk.Tk):
                     self.undo_btn.configure(state='disabled')
                 self.status('Pick Hexagon or Cyclones for a pole first')
                 return
+        if what == 'rings':
+            r = P['rings']
+            r.update({'zones': random.randint(2, 6), 'ringlets': round(R(0.3, 0.9), 2), 'detail': round(R(0.6, 1.8), 2),
+                      'opacity': round(R(0.6, 0.95), 2), 'edge': round(R(0.1, 0.6), 2), 'variation': round(R(0.2, 0.6), 2),
+                      'pattern': random.randint(0, 9999)})
+            k = random.randint(1, 3)
+            gaps = [[round(R(0.35, 0.75), 3), round(R(0.02, 0.05), 3), round(R(0.85, 1.0), 2)]]
+            for _ in range(k - 1):
+                gaps.append([round(R(0.12, 0.96), 3), round(R(0.003, 0.012), 3), round(R(0.6, 1.0), 2)])
+            r['gaps'] = sorted(gaps)
         if what == 'all':
             P['seed'] = random.randint(1, 99999)
         self.refresh_all()
@@ -1720,6 +2164,7 @@ class App(tk.Tk):
         self.band_ed = ed
         ttk.Button(ed.bar, text='Sort', command=self.sort_lists).pack(side='left', padx=6)
         ttk.Button(ed.bar, text='Colours from picture\u2026', command=self.sample).pack(side='left')
+        ttk.Button(ed.bar, text='Move on the map', command=lambda: self.set_tool('bands')).pack(side='left', padx=6)
         g = self.grid_box(p)
         Slider(self, g, 0, 'Band softness (\u00b0)', ('band_blend',), 0.3, 10, 0.1)
         Slider(self, g, 1, 'Band edge wobble (\u00b0)', ('band_wobble',), 0, 5, 0.1)
@@ -1822,11 +2267,20 @@ class App(tk.Tk):
         lab.pack(side='left')
 
         def pick(_e=None):
-            c = colorchooser.askcolor(color=hexcol(item.get('color') or band_col), parent=self)
-            if c and c[0]:
-                item['color'] = [int(round(x)) for x in c[0]]
-                self.glow_ed.rebuild()
+            old = copy.deepcopy(item.get('color'))
+
+            def live(v):
+                item['color'] = v
+                lab.configure(bg=hexcol(v))
                 self.changed()
+
+            def restore():
+                item['color'] = old
+            c = pick_colour(self, old or band_col, live=live, restore=restore)
+            if c:
+                item['color'] = c
+            self.glow_ed.rebuild()
+            self.changed()
 
         def reset():
             item['color'] = None
@@ -1974,6 +2428,28 @@ class App(tk.Tk):
                         self.new_big_storm, card=True, cols=4, add_text='Add big storm')
         be.frame.pack(fill='x', pady=6)
         self.storm_ed = be
+        ttk.Button(be.bar, text='Place on the map', command=self.place_from_tab).pack(side='left', padx=6)
+        self.section(p, 'Storm chains')
+        ttk.Label(p, text='A row of storms along a latitude, like Jupiter\u2019s \u201cstring of pearls\u201d. Length 360 = all the '
+                          'way round. Jitter makes them a little uneven. Draw one on the map with \u201cStorm chain\u201d '
+                          'above the preview.', style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        cdef = gg.CHAIN
+        ce = ListEditor(self, p, lambda: self.P['storm_chains'],
+                        [num('Latitude', 'lat', -85, 85, 0.5, '%.1f'), num('End latitude', 'lat_end', -85, 85, 0.5, '%.1f'),
+                         num('Longitude', 'lon', 0, 360, 1, '%.0f'), num('Length (\u00b0)', 'length', 1, 360, 1, '%.0f', cdef['length']),
+                         num('Count', 'count', 1, 40, 1, '%.0f', cdef['count'], isint=True),
+                         num('Size', 'size', 0.004, 0.05, 0.001, '%.3f', cdef['size']),
+                         num('Stretch', 'aspect', 1, 4, 0.1, '%.1f', cdef['aspect']),
+                         num('Turns', 'turns', 0, 3, 0.1, '%.1f', cdef['turns']), spinf('Spin', 'spin'),
+                         num('Ragged', 'ragged', 0, 0.6, 0.05, '%.2f', cdef['ragged']),
+                         num('Bright centre', 'core', 0, 1, 0.05, '%.2f', cdef['core']),
+                         num('Centre size', 'core_size', 0.1, 1.5, 0.05, '%.2f', cdef['core_size']),
+                         colf('Centre colour', 'core_color', tuple(cdef['core_color'])),
+                         num('Jitter', 'jitter', 0, 1, 0.05, '%.2f', cdef['jitter'])],
+                        self.new_chain, card=True, cols=4, add_text='Add storm chain')
+        ce.frame.pack(fill='x', pady=6)
+        self.chain_ed = ce
+        ttk.Button(ce.bar, text='Draw on the map', command=lambda: self.set_tool('chain')).pack(side='left', padx=6)
 
     def tab_poles(self):
         sf = ScrollFrame(self.nb)
@@ -1997,11 +2473,20 @@ class App(tk.Tk):
         lab.pack(side='left')
 
         def pick(_e=None):
-            c = colorchooser.askcolor(color=hexcol(item.get('arm_color') or item.get('core_color') or cur), parent=self)
-            if c and c[0]:
-                item['arm_color'] = [int(round(x)) for x in c[0]]
-                self.storm_ed.rebuild()
+            old = copy.deepcopy(item.get('arm_color'))
+
+            def live(v):
+                item['arm_color'] = v
+                lab.configure(bg=hexcol(v))
                 self.changed()
+
+            def restore():
+                item['arm_color'] = old
+            c = pick_colour(self, old or item.get('core_color') or cur, live=live, restore=restore)
+            if c:
+                item['arm_color'] = c
+            self.storm_ed.rebuild()
+            self.changed()
 
         def reset():
             item['arm_color'] = None
@@ -2038,7 +2523,7 @@ class App(tk.Tk):
         g = ttk.Frame(p)
         g.pack(fill='x', pady=4)
         self.v_files = {}
-        for i, (k, lab) in enumerate((('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'))):
+        for i, (k, lab) in enumerate((('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'))):
             ttk.Label(g, text=lab).grid(row=i, column=0, sticky='w', padx=8, pady=4)
             v = tk.StringVar()
             e = ttk.Entry(g, textvariable=v, width=40)
@@ -2047,12 +2532,225 @@ class App(tk.Tk):
             e.bind('<FocusOut>', self.commit_files)
             self.v_files[k] = v
         self.v_flow = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g, text='Make an EVE flow map', variable=self.v_flow, command=self.commit_files).grid(row=4, column=1, sticky='w', pady=4)
+        ttk.Checkbutton(g, text='Make an EVE flow map', variable=self.v_flow, command=self.commit_files).grid(row=5, column=1, sticky='w', pady=4)
         self.section(p, 'Preview camera')
         g = self.grid_box(p)
         Slider(self, g, 0, 'Tilt', ('preview', 'tilt'), -90, 90, 1)
         Slider(self, g, 1, 'View latitude', ('preview', 'view_lat'), -90, 90, 1)
         Slider(self, g, 2, 'View longitude', ('preview', 'view_lon'), 0, 360, 5)
+
+    def new_chain(self):
+        c = gg.chain_entry({})
+        c['core_color'] = [int(min(255, v + 10)) for v in self.P['storms']['core_color']]
+        return c
+
+    def tab_rings(self):
+        sf = ScrollFrame(self.nb)
+        self.nb.add(sf, text='Rings')
+        self.rings_tab = sf
+        p = sf.inner
+        top = ttk.Frame(p)
+        top.pack(fill='x', pady=(2, 0))
+        self.ring_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='This planet has rings', variable=self.ring_on, command=self.ring_toggle).pack(side='left')
+        ttk.Button(top, text='Randomize rings', command=lambda: self.randomize('rings')).pack(side='right')
+        ttk.Button(top, text='New pattern', command=self.ring_new_pattern).pack(side='right', padx=6)
+        self.ring_cv = tk.Canvas(p, width=560, height=300, bg='#0d0f14', highlightthickness=1, highlightbackground=LINE)
+        self.ring_cv.pack(anchor='w', pady=(8, 4))
+        self.ring_strip = tk.Canvas(p, width=560, height=24, bg='#0d0f14', highlightthickness=1, highlightbackground=LINE)
+        self.ring_strip.pack(anchor='w')
+        lr = ttk.Frame(p)
+        lr.pack(fill='x')
+        ttk.Label(lr, text='inner edge', style='Dim.TLabel').pack(side='left')
+        ttk.Label(lr, text='outer edge', style='Dim.TLabel').pack(side='left', padx=(450, 0))
+        self.section(p, 'Size and tilt')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Inner edge (planet radii)', ('rings', 'inner'), 1.0, 4.0, 0.01)
+        Slider(self, g, 1, 'Outer edge (planet radii)', ('rings', 'outer'), 1.1, 8.0, 0.01)
+        Slider(self, g, 2, 'Tilt (\u00b0)', ('rings', 'angle'), 0, 90, 0.5, tip='against the equator; goes into the config as angle')
+        Slider(self, g, 4, 'View from (\u00b0)', ('rings', 'view'), 2, 80, 1, tip='only for this picture')
+        self.section(p, 'Structure')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Wide zones', ('rings', 'zones'), 1, 8, 1, isint=True)
+        Slider(self, g, 1, 'Ringlets', ('rings', 'ringlets'), 0, 1, 0.05)
+        Slider(self, g, 2, 'Ringlet detail', ('rings', 'detail'), 0.3, 3, 0.05)
+        Slider(self, g, 3, 'Opacity', ('rings', 'opacity'), 0, 1, 0.05)
+        Slider(self, g, 4, 'Soft edges', ('rings', 'edge'), 0, 1, 0.05)
+        Slider(self, g, 5, 'Colour variation', ('rings', 'variation'), 0, 1, 0.05)
+        self.section(p, 'Gaps')
+        ttk.Label(p, text='Position 0 = inner edge, 1 = outer edge. Width in the same units. Depth 1 = empty.',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        ge = ListEditor(self, p, lambda: self.P['rings']['gaps'],
+                        [num('Position', 0, 0, 1, 0.005, '%.3f', width=8), num('Width', 1, 0.001, 0.3, 0.001, '%.3f', width=8),
+                         num('Depth', 2, 0, 1, 0.05, '%.2f')],
+                        lambda: [round(random.uniform(0.2, 0.9), 3), 0.01, 1.0], add_text='Add gap')
+        ge.frame.pack(fill='x', pady=6)
+        self.gap_ed = ge
+        ttk.Button(ge.bar, text='Random gaps', command=self.ring_random_gaps).pack(side='left', padx=6)
+        self.section(p, 'Colours')
+        ttk.Label(p, text='Left on auto, the ring colours come from the planet\u2019s bands.', style='Dim.TLabel').pack(anchor='w')
+        self.ring_cols = ttk.Frame(p)
+        self.ring_cols.pack(fill='x', pady=(4, 0))
+        self.section(p, 'Texture and Kopernicus config')
+        g = ttk.Frame(p)
+        g.pack(fill='x')
+        ttk.Label(g, text='Texture width').pack(side='left', padx=(8, 8))
+        self.ring_size = tk.StringVar(value='2048')
+        rc = ttk.Combobox(g, textvariable=self.ring_size, values=['1024', '2048', '4096'], width=6, state='readonly')
+        rc.pack(side='left')
+        rc.bind('<<ComboboxSelected>>', self.ring_size_changed)
+        ttk.Label(p, text='Build writes the ring texture with the other maps; Export saves it as DDS (BC3 / DXT5 with '
+                          'alpha, or BC7) or PNG. The left end of the file is the outer edge of the ring, which is how '
+                          'Kopernicus maps it. Paste this into the planet\u2019s Body node:',
+                  style='Dim.TLabel', wraplength=520, justify='left').pack(anchor='w', pady=(6, 4))
+        self.ring_cfg = tk.Text(p, height=13, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9))
+        self.ring_cfg.pack(anchor='w')
+        ttk.Button(p, text='Copy config', command=self.ring_copy).pack(anchor='w', pady=(6, 0))
+        self.swatches.append(type('R', (), {'refresh': lambda s=None: self.ring_refresh()})())
+        self.nb.bind('<<NotebookTabChanged>>', lambda e: self.ring_schedule(), add='+')
+
+    def ring_visible(self):
+        try:
+            return self.nb.select() == str(self.rings_tab)
+        except (tk.TclError, AttributeError):
+            return False
+
+    def ring_schedule(self, delay=150):
+        if not self.ring_visible():
+            return
+        if getattr(self, 'ring_after', None):
+            self.after_cancel(self.ring_after)
+        self.ring_after = self.after(delay, self.ring_draw)
+
+    def ring_refresh(self):
+        r = self.P['rings']
+        self.ring_on.set(bool(r.get('enabled')))
+        self.ring_size.set(str(r.get('size', 2048)))
+        for w in self.ring_cols.winfo_children():
+            w.destroy()
+        for i, (k, lab) in enumerate((('inner_color', 'Inner'), ('middle_color', 'Middle'), ('outer_color', 'Outer'))):
+            ttk.Label(self.ring_cols, text=lab).grid(row=0, column=i * 2, sticky='w', padx=(8, 6))
+            self.ring_colour_pick(self.ring_cols, k).grid(row=0, column=i * 2 + 1, sticky='w', padx=(0, 18))
+        self.ring_text()
+        self.ring_schedule(10)
+
+    def ring_colour_pick(self, parent, k):
+        fr = ttk.Frame(parent)
+        r = self.P['rings']
+        auto = gg.ring_colours(self.P, gg.ring_entry(r))[('inner_color', 'middle_color', 'outer_color').index(k)]
+        auto = [int(round(float(v))) for v in auto]
+        lab = tk.Label(fr, bg=hexcol(r.get(k) or auto), width=6, relief='solid', bd=1, cursor='hand2')
+        lab.pack(side='left')
+
+        def pick(_e=None):
+            old = copy.deepcopy(r.get(k))
+
+            def live(v):
+                r[k] = v
+                lab.configure(bg=hexcol(v))
+                self.changed()
+
+            def restore():
+                r[k] = old
+            c = pick_colour(self, old or auto, live=live, restore=restore)
+            if c:
+                r[k] = c
+            self.ring_refresh()
+            self.changed()
+
+        def reset():
+            r[k] = None
+            self.ring_refresh()
+            self.changed()
+        lab.bind('<Button-1>', pick)
+        if r.get(k):
+            ttk.Button(fr, text='\u21ba', width=2, style='Small.TButton', command=reset).pack(side='left', padx=(4, 0))
+        else:
+            ttk.Label(fr, text='auto', style='Dim.TLabel').pack(side='left', padx=(6, 0))
+        return fr
+
+    def ring_path(self):
+        fn = self.P['files'].get('ring') or '%s_ring.dds' % self.P['name']
+        base = os.path.splitext(fn)[0].replace('\\', '/')
+        d = gg.texture_dir() if hasattr(gg, 'texture_dir') else None
+        pre = 'MyPlanets/Textures'
+        if d:
+            parts = os.path.normpath(d).split(os.sep)
+            low = [x.lower() for x in parts]
+            if 'gamedata' in low:
+                i = len(low) - 1 - low[::-1].index('gamedata')
+                if i + 1 < len(parts):
+                    pre = '/'.join(parts[i + 1:])
+        return pre + '/' + base
+
+    def ring_text(self):
+        self.ring_cfg.configure(state='normal')
+        self.ring_cfg.delete('1.0', 'end')
+        self.ring_cfg.insert('1.0', gg.ring_snippet(self.P, self.ring_path()))
+        self.ring_cfg.configure(state='disabled')
+
+    def ring_copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(gg.ring_snippet(self.P, self.ring_path()))
+        self.status('Ring config copied')
+
+    def ring_draw(self):
+        self.ring_after = None
+        try:
+            e = gg.ring_entry(self.P['rings'])
+            col, a = gg.ring_profile(self.P, 1024)
+            L = self.live_last if self.live_on.get() else None
+            tex = L['col'] if L is not None else np.asarray(band_image(self.P, 1024, 512))
+            img = gg.ring_scene(tex, col, a, e)
+            if not e['enabled']:
+                img = Image.blend(img, Image.new('RGB', img.size, (13, 15, 20)), 0.55)
+                d = ImageDraw.Draw(img)
+                d.text((12, 10), 'Rings are off \u2013 tick \u201cThis planet has rings\u201d', fill=(220, 225, 235), font=sheet_font(15))
+            self.ring_img = ImageTk.PhotoImage(img)
+            self.ring_cv.delete('all')
+            self.ring_cv.create_image(0, 0, image=self.ring_img, anchor='nw')
+            st = np.concatenate([col, (a * 255)[:, None]], 1)
+            ch = np.array([13, 15, 20], np.float32)
+            rgb = st[:, :3] * (st[:, 3:] / 255) + ch * (1 - st[:, 3:] / 255)
+            strip = Image.fromarray(np.repeat(rgb[None], 24, 0).clip(0, 255).astype(np.uint8)).resize((560, 24), Image.LANCZOS)
+            self.ring_strip_img = ImageTk.PhotoImage(strip)
+            self.ring_strip.delete('all')
+            self.ring_strip.create_image(0, 0, image=self.ring_strip_img, anchor='nw')
+        except Exception as ex:
+            self.ring_cv.delete('all')
+            self.ring_cv.create_text(280, 150, text='Could not draw the rings: %s' % ex, fill=DIM)
+        self.ring_text()
+
+    def ring_toggle(self):
+        self.snapshot()
+        self.P['rings']['enabled'] = bool(self.ring_on.get())
+        if self.ring_on.get() and not self.P['files'].get('ring'):
+            self.P['files']['ring'] = '%s_ring.dds' % self.P['name']
+            if 'ring' in self.v_files:
+                self.v_files['ring'].set(self.P['files']['ring'])
+        self.changed()
+        self.ring_schedule(10)
+
+    def ring_size_changed(self, _e=None):
+        self.P['rings']['size'] = int(self.ring_size.get())
+        self.changed()
+
+    def ring_new_pattern(self):
+        self.snapshot()
+        self.P['rings']['pattern'] = int(self.P['rings'].get('pattern', 0)) + 1
+        self.changed()
+        self.ring_schedule(10)
+
+    def ring_random_gaps(self):
+        self.snapshot()
+        k = random.randint(1, 4)
+        gaps = [[round(random.uniform(0.35, 0.75), 3), round(random.uniform(0.02, 0.05), 3), round(random.uniform(0.85, 1.0), 2)]]
+        for _ in range(k - 1):
+            gaps.append([round(random.uniform(0.12, 0.96), 3), round(random.uniform(0.003, 0.012), 3), round(random.uniform(0.6, 1.0), 2)])
+        self.P['rings']['gaps'] = sorted(gaps)
+        self.gap_ed.rebuild()
+        self.changed()
+        self.ring_schedule(10)
 
     def new_big_storm(self):
         s = gg.big_storm({})
@@ -2080,6 +2778,8 @@ class App(tk.Tk):
             self.v_files['flow'].set('GiantFlow/%s_flow.truecolor' % self.P['name'])
         if not self.v_files['emissive'].get():
             self.v_files['emissive'].set('%s_emissive.dds' % self.P['name'])
+        if not self.v_files['ring'].get():
+            self.v_files['ring'].set('%s_ring.dds' % self.P['name'])
         self.pick.configure(values=self.preset_names())
         self.pick.set(self.P['name'])
         self.update_title()
@@ -2089,7 +2789,7 @@ class App(tk.Tk):
     def update_res_info(self):
         r = self.res.get()
         txt = '%s \u00d7 %d  \u00b7  %s' % (r, int(r) // 2, RES_INFO.get(r, ''))
-        if self.P.get('big_storms'):
+        if self.P.get('big_storms') or self.P.get('storm_chains'):
             txt += '  \u00b7  big storms: about 1.3\u00d7 longer'
         if gg.has_poles(self.P):
             txt += '  \u00b7  polar features: about 1.5\u20132\u00d7 longer'
@@ -2106,6 +2806,8 @@ class App(tk.Tk):
         self.dirty = True
         self.update_title()
         self.update_res_info()
+        if hasattr(self, 'ring_cv'):
+            self.ring_schedule()
         if self.view.get() == 'bands':
             if self.pending:
                 self.after_cancel(self.pending)
@@ -2149,6 +2851,9 @@ class App(tk.Tk):
         em = self.v_files['emissive'].get().strip()
         if em and ('emissive' in self.P['files'] or self.P['emission'] or gg.has_heat(self.P) or em != '%s_emissive.dds' % self.P['name']):
             new['emissive'] = em
+        rg = self.v_files['ring'].get().strip()
+        if rg and ('ring' in self.P['files'] or gg.has_rings(self.P) or rg != '%s_ring.dds' % self.P['name']):
+            new['ring'] = rg
         new = {k: v for k, v in new.items() if v}
         if new != {k: v for k, v in self.P['files'].items() if v}:
             self.P['files'] = new
@@ -2225,6 +2930,8 @@ class App(tk.Tk):
         self.preset_file = path
         self.dirty = False
         self.history = []
+        self.stop_live()
+        self.live_last = None
         self.undo_btn.configure(state='disabled')
         self.refresh_all()
 
@@ -2317,24 +3024,32 @@ class App(tk.Tk):
         if v in ('preview', 'flat') and self.is_stale():
             self.status('Settings changed since this build – press Build to update')
 
-    def update_view(self):
+    def update_view(self, from_live=False):
         self.pending = None
         v = self.view.get()
         if v == 'bands':
+            skey = json.dumps(self.P, sort_keys=True, default=str)
+            live = self.live_last if self.live_on.get() else None
+            heat = gg.has_heat(self.P)
             try:
-                strip = band_image(self.P, 1024, 512)
+                if live is not None:
+                    strip = Image.fromarray(live['col']).resize((1024, 512), Image.LANCZOS)
+                    em = None
+                    if live['em'] is not None:
+                        em = np.asarray(Image.fromarray(live['em']).resize((1024, 512), Image.LANCZOS)).astype(np.float32) / 255.0
+                else:
+                    strip = band_image(self.P, 1024, 512)
+                    gl = glow_image(self.P, 1024, 512)
+                    em = (gl / 255.0).astype(np.float32) if gl is not None else None
+                    if heat:
+                        la = np.radians(90 - (np.arange(512) + 0.5) / 512 * 180).astype(np.float32)[:, None]
+                        he = gg.heat_emission(self.P, np.asarray(strip).astype(np.float32), la) / 255.0
+                        em = he.astype(np.float32) if em is None else np.clip(em + he, 0, 1).astype(np.float32)
             except Exception:
                 return
             tex = np.asarray(strip).astype(np.float32) / 255
-            pv = self.P['preview']
-            gl = glow_image(self.P, 1024, 512)
-            em = (gl / 255.0).astype(np.float32) if gl is not None else None
-            heat = gg.has_heat(self.P)
-            if heat:
-                la = np.radians(90 - (np.arange(512) + 0.5) / 512 * 180).astype(np.float32)[:, None]
-                he = gg.heat_emission(self.P, np.asarray(strip).astype(np.float32), la) / 255.0
-                em = he.astype(np.float32) if em is None else np.clip(em + he, 0, 1).astype(np.float32)
-            sph = gg.render_sphere(tex, 512, pv['tilt'], pv['view_lat'], pv['view_lon'], em, gg.NIGHT_LIGHT if heat else None)
+            light = gg.NIGHT_LIGHT if heat else None
+            sph = self.sphere_image(tex, em, light, 512)
             flat = strip.copy()
             d = ImageDraw.Draw(flat)
             for g in self.P['emission']:
@@ -2354,17 +3069,27 @@ class App(tk.Tk):
                 d.polygon([(1023, y - 7), (1009, y), (1023, y + 7)], fill=c)
             poles = [(sgn, key) for sgn, key in ((1, 'north'), (-1, 'south'))
                      if self.P.get('poles', {}).get(key, {}).get('type', 'none') != 'none']
-            sheet = Image.new('RGB', (1024 + 512 + 24, 512 + (250 if poles else 0)), (13, 15, 20))
-            sheet.paste(sph, (0, 0))
+            sheet = Image.new('RGB', (1024 + 512 + 24, 512 + (262 if poles else 34)), (13, 15, 20))
             sheet.paste(flat, (512 + 24, 0))
+            d = ImageDraw.Draw(sheet)
+            hint = 'drag to turn \u00b7 double-click resets'
+            f17 = sheet_font(17)
+            d.text((256 - d.textlength(hint, font=f17) / 2, 520), hint, fill=DIM, font=f17)
             if poles:
-                d = ImageDraw.Draw(sheet)
                 for i, (sgn, key) in enumerate(poles):
                     x = 536 + i * 260
-                    sheet.paste(pole_disc(strip, sgn, 220), (x, 530))
-                    d.text((x, 516), '%s pole (from above)' % key.capitalize(), fill=DIM)
+                    sheet.paste(pole_disc(strip, sgn, 220), (x, 540))
+                    d.text((x, 516), '%s pole (from above)' % key.capitalize(), fill=DIM, font=f17)
+            self.live_view = {'tex': tex, 'em': em, 'light': light, 'sheet': sheet}
+            sheet = sheet.copy()
+            sheet.paste(sph, (0, 0))
             self.view_src = sheet
-            self.status('Bands only – swirls appear when you press Build' if not self.proc else self.stat.cget('text'))
+            if not self.proc and self.map_tool.get() == 'turn':
+                self.status('Live preview \u2013 press Build for the full-size map' if self.live_on.get()
+                            else 'Bands only \u2013 swirls appear when you press Build')
+            if not from_live:
+                self.request_live(skey)
+            self.update_live_label(skey)
         else:
             f = os.path.join(self.out_path(), self.P['name'] + ('_preview.png' if v == 'preview' else '_color.png'))
             if os.path.isfile(f):
@@ -2383,23 +3108,611 @@ class App(tk.Tk):
         self.update_export_state()
         self.redraw()
 
+    def sphere_image(self, tex, em, light, S):
+        pv = self.P['preview']
+        vlat = max(-90.0, min(90.0, float(pv['view_lat']) + self.rot[1]))
+        return gg.render_sphere(tex, S, pv['tilt'], vlat, float(pv['view_lon']) + self.rot[0], em, light)
+
+    def sheet_xy(self, e):
+        if self.view_geom is None:
+            return None
+        s, ox, oy = self.view_geom
+        return (e.x - ox) / s, (e.y - oy) / s
+
+    def view_angles(self):
+        pv = self.P['preview']
+        t = np.radians(float(pv['tilt']))
+        a = np.radians(max(-90.0, min(90.0, float(pv['view_lat']) + self.rot[1])))
+        return t, a, float(pv['view_lon']) + self.rot[0]
+
+    @staticmethod
+    def flat_lat(y):
+        return 90.0 - (y + 0.5) / 512.0 * 180.0
+
+    @staticmethod
+    def on_flat(p):
+        return p is not None and 536 <= p[0] < 1560 and 0 <= p[1] < 512
+
+    def map_point(self, p):
+        if p is None:
+            return None
+        x, y = p
+        if self.on_flat(p):
+            return self.flat_lat(y), ((x - 536 + 0.5) / 1024.0 * 360.0) % 360.0
+        u = (x + 0.5) / 512.0 * 2 - 1
+        v = 1 - (y + 0.5) / 512.0 * 2
+        r2 = u * u + v * v
+        if r2 >= 1:
+            return None
+        z = np.sqrt(1 - r2)
+        t, a, vlon = self.view_angles()
+        u2 = u * np.cos(t) - v * np.sin(t)
+        v2 = u * np.sin(t) + v * np.cos(t)
+        y3 = v2 * np.cos(a) + z * np.sin(a)
+        z3 = -v2 * np.sin(a) + z * np.cos(a)
+        lat = float(np.degrees(np.arcsin(np.clip(y3, -1, 1))))
+        lon = float((np.degrees(np.arctan2(u2, z3)) + vlon) % 360.0)
+        return lat, lon
+
+    def globe_xy(self, lat, lon):
+        t, a, vlon = self.view_angles()
+        la, lo = np.radians(lat), np.radians(lon - vlon)
+        y3 = np.sin(la); u2 = np.cos(la) * np.sin(lo); z3 = np.cos(la) * np.cos(lo)
+        v2 = y3 * np.cos(a) - z3 * np.sin(a)
+        z = y3 * np.sin(a) + z3 * np.cos(a)
+        u = u2 * np.cos(t) + v2 * np.sin(t)
+        v = -u2 * np.sin(t) + v2 * np.cos(t)
+        return (u + 1) / 2 * 512, (1 - v) / 2 * 512, z
+
+    @staticmethod
+    def ang_dist(lat1, lon1, lat2, lon2):
+        la1, lo1, la2, lo2 = np.radians([lat1, lon1, lat2, lon2])
+        return float(np.degrees(np.arccos(np.clip(np.sin(la1) * np.sin(la2) + np.cos(la1) * np.cos(la2) * np.cos(lo1 - lo2), -1, 1))))
+
+    def storm_near(self, lat, lon):
+        best = None
+        for i, b in enumerate(self.P.get('big_storms', [])):
+            d = self.ang_dist(lat, lon, float(b['lat']), float(b['lon']))
+            lim = max(4.0, float(b.get('size', 0.025)) * 360 * 1.3)
+            if d <= lim and (best is None or d < best[0]):
+                best = (d, i)
+        return None if best is None else best[1]
+
+    def chain_near(self, lat, lon):
+        best = None
+        for ci, c in enumerate(self.P.get('storm_chains', [])):
+            lim = max(4.0, float(c.get('size', 0.012)) * 360 * 1.3)
+            for la, lo in gg.chain_points(c):
+                d = self.ang_dist(lat, lon, la, lo)
+                if d <= lim and (best is None or d < best[0]):
+                    best = (d, ci)
+        return None if best is None else best[1]
+
+    def band_edge_near(self, p):
+        if not self.on_flat(p) or self.view_geom is None:
+            return None
+        tol = 8.0 / self.view_geom[0]
+        best = None
+        for i, b in enumerate(self.P['bands']):
+            if i == 0:
+                continue
+            yb = (90.0 - float(b[0])) / 180.0 * 512
+            d = abs(yb - p[1])
+            if d <= tol and (best is None or d < best[0]):
+                best = (d, i)
+        return None if best is None else best[1]
+
+    TOOL_HINTS = {'turn': None,
+                  'storms': 'Click the map or the globe to add a big storm \u00b7 drag a storm to move it \u00b7 right-click removes it',
+                  'chain': 'Drag along a latitude to draw a chain of storms \u00b7 a single click makes a ring all the way round '
+                           '\u00b7 drag a chain to move it \u00b7 right-click removes it',
+                  'bands': 'Drag a band edge up or down (its curls come along) \u00b7 double-click splits a band \u00b7 '
+                           'right-click an edge removes it'}
+
+    def tool_changed(self):
+        tool = self.map_tool.get()
+        if tool != 'turn' and self.view.get() != 'bands':
+            self.view.set('bands')
+            self.update_view()
+        self.canvas.configure(cursor={'turn': '', 'storms': 'crosshair', 'chain': 'crosshair', 'bands': 'sb_v_double_arrow'}[tool])
+        hint = self.TOOL_HINTS[tool]
+        if hint:
+            self.status(hint)
+        else:
+            self.status('Live preview \u2013 press Build for the full-size map' if self.live_on.get() else 'Bands only \u2013 swirls appear when you press Build')
+        self.redraw()
+
+    def set_tool(self, tool):
+        self.map_tool.set(tool)
+        self.tool_changed()
+
+    def place_from_tab(self):
+        self.set_tool('storms')
+
+    def placing(self):
+        return self.map_tool.get() != 'turn' and self.view.get() == 'bands' and self.live_view is not None
+
+    def storm_set_pos(self, i, lat, lon):
+        b = self.P['big_storms'][i]
+        b['lat'] = round(max(-85.0, min(85.0, lat)), 1)
+        b['lon'] = round(lon % 360.0, 1)
+
+    def storm_done(self):
+        self.storm_ed.rebuild()
+        self.changed()
+
+    def chain_done(self):
+        self.chain_ed.rebuild()
+        self.changed()
+
+    def drop_snapshot(self):
+        if self.history:
+            self.history.pop()
+            if not self.history:
+                self.undo_btn.configure(state='disabled')
+
+    def storm_remove_click(self, e):
+        if not self.placing():
+            return
+        p = self.sheet_xy(e)
+        tool = self.map_tool.get()
+        if tool == 'bands':
+            i = self.band_edge_near(p)
+            if i is None:
+                return
+            self.snapshot()
+            self.P['bands'].pop(i)
+            self.band_removed(i)
+            self.band_ed.rebuild()
+            self.bands_changed()
+            self.redraw()
+            self.status('Removed a band edge \u2013 Undo brings it back')
+            return
+        mp = self.map_point(p)
+        if mp is None:
+            return
+        if tool == 'chain':
+            ci = self.chain_near(*mp)
+            if ci is None:
+                return
+            self.snapshot()
+            self.P['storm_chains'].pop(ci)
+            self.chain_done()
+            self.redraw()
+            self.status('Removed a storm chain \u2013 Undo brings it back')
+            return
+        i = self.storm_near(*mp)
+        if i is None:
+            return
+        self.snapshot()
+        self.P['big_storms'].pop(i)
+        self.storm_done()
+        self.redraw()
+        self.status('Removed a big storm \u2013 Undo brings it back')
+
+    def drag_start(self, e):
+        self.drag = None
+        self.sdrag = None
+        self.cdrag = None
+        self.bdrag = None
+        if self.view.get() != 'bands' or self.live_view is None:
+            return
+        p = self.sheet_xy(e)
+        tool = self.map_tool.get()
+        if tool == 'bands':
+            if not self.on_flat(p):
+                return
+            if any(a[0] > b[0] for a, b in zip(self.P['bands'][:-1], self.P['bands'][1:])):
+                gg.sort_bands(self.P)
+                self.band_ed.rebuild()
+            i = self.band_edge_near(p)
+            if i is None:
+                return
+            bands = self.P['bands']
+            self.snapshot()
+            old = float(bands[i][0])
+            lo = max(-89.5, float(bands[i - 1][0]) + 0.5)
+            hi = float(bands[i + 1][0]) - 0.5 if i + 1 < len(bands) else 89.5
+            linked = [(ed, float(ed['lat'])) for ed in self.P['edges'] if abs(float(ed['lat']) - old) <= 0.75]
+            self.bdrag = {'i': i, 'lo': lo, 'hi': hi, 'old': old, 'edges': linked, 'moved': False}
+            self.redraw()
+            return
+        if tool == 'chain':
+            mp = self.map_point(p)
+            if mp is None:
+                return
+            self.snapshot()
+            ci = self.chain_near(*mp)
+            if ci is not None:
+                c = self.P['storm_chains'][ci]
+                self.cdrag = {'mode': 'move', 'ci': ci, 'start': mp, 'orig': (float(c['lat']), float(c['lat_end']), float(c['lon'])), 'moved': False}
+            else:
+                self.cdrag = {'mode': 'new', 'a': mp, 'b': mp}
+            self.redraw()
+            return
+        if tool == 'storms':
+            mp = self.map_point(p)
+            if mp is None:
+                return
+            self.snapshot()
+            i = self.storm_near(*mp)
+            if i is None:
+                s = self.new_big_storm()
+                self.P['big_storms'].append(s)
+                i = len(self.P['big_storms']) - 1
+                self.storm_set_pos(i, *mp)
+                self.status('Added a big storm at %.1f\u00b0, %.0f\u00b0 \u2013 drag to move it, settings in the Storms tab' % (self.P['big_storms'][i]['lat'], self.P['big_storms'][i]['lon']))
+                self.sdrag = [i, True]
+            else:
+                self.sdrag = [i, False]
+            self.redraw()
+            return
+        if p and (p[0] - 256) ** 2 + (p[1] - 256) ** 2 <= 256 ** 2:
+            self.drag = (p[0], p[1], self.rot[0], self.rot[1])
+
+    def drag_move(self, e):
+        p = self.sheet_xy(e)
+        if self.bdrag is not None:
+            if p is None:
+                return
+            d = self.bdrag
+            lat = round(min(max(self.flat_lat(p[1]), d['lo']), d['hi']), 1)
+            self.P['bands'][d['i']][0] = lat
+            for ed, l0 in d['edges']:
+                ed['lat'] = round(max(-89.0, min(89.0, l0 + lat - d['old'])), 1)
+            d['moved'] = True
+            self.redraw(fast=True)
+            return
+        if self.cdrag is not None:
+            mp = self.map_point(p)
+            if mp is None:
+                return
+            d = self.cdrag
+            if d['mode'] == 'new':
+                d['b'] = mp
+            else:
+                c = self.P['storm_chains'][d['ci']]
+                dlat = mp[0] - d['start'][0]
+                dlon = ((mp[1] - d['start'][1] + 180) % 360) - 180
+                la0, la1, lo0 = d['orig']
+                c['lat'] = round(max(-85.0, min(85.0, la0 + dlat)), 1)
+                c['lat_end'] = round(max(-85.0, min(85.0, la1 + dlat)), 1)
+                c['lon'] = round((lo0 + dlon) % 360.0, 1)
+                d['moved'] = True
+            self.redraw(fast=True)
+            return
+        if self.sdrag is not None:
+            mp = self.map_point(p)
+            if mp is not None:
+                self.storm_set_pos(self.sdrag[0], *mp)
+                self.sdrag[1] = True
+                self.redraw(fast=True)
+            return
+        if self.drag is None:
+            return
+        if not p:
+            return
+        x0, y0, r0, r1 = self.drag
+        self.rot[0] = (r0 - (p[0] - x0) * 0.35) % 360
+        self.rot[1] = max(-180.0, min(180.0, r1 + (p[1] - y0) * 0.35))
+        if not getattr(self, 'spin_pending', False):
+            self.spin_pending = True
+            self.after_idle(lambda: self.respin(True))
+
+    def new_chain_from(self, a, b):
+        if self.ang_dist(a[0], a[1], b[0], b[1]) < 3.0:
+            c = {'lat': round(a[0], 1), 'lat_end': round(a[0], 1), 'lon': round(a[1], 1), 'length': 360.0, 'count': 12}
+        else:
+            dl = ((b[1] - a[1] + 180) % 360) - 180
+            if dl >= 0:
+                lon0, length, la0, la1 = a[1], dl, a[0], b[0]
+            else:
+                lon0, length, la0, la1 = b[1], -dl, b[0], a[0]
+            length = max(length, 1.0)
+            c = {'lat': round(la0, 1), 'lat_end': round(la1, 1), 'lon': round(lon0 % 360.0, 1), 'length': round(length, 1),
+                 'count': int(min(30, max(2, round(length / 11.0) + 1)))}
+        c['lat'] = max(-85.0, min(85.0, c['lat']))
+        c['lat_end'] = max(-85.0, min(85.0, c['lat_end']))
+        new = self.new_chain()
+        new.update(c)
+        return gg.chain_entry(new)
+
+    def drag_end(self, _e=None):
+        if self.bdrag is not None:
+            d = self.bdrag
+            self.bdrag = None
+            if d['moved']:
+                for ed in self.editors:
+                    ed.rebuild()
+                self.bands_changed()
+                self.status('Band edge now at %.1f\u00b0' % self.P['bands'][d['i']][0])
+            else:
+                self.drop_snapshot()
+            self.redraw()
+            return
+        if self.cdrag is not None:
+            d = self.cdrag
+            self.cdrag = None
+            if d['mode'] == 'new':
+                c = self.new_chain_from(d['a'], d['b'])
+                self.P['storm_chains'].append(c)
+                self.chain_done()
+                self.status('Added a chain of %d storms \u2013 count, size and look are in the Storms tab' % c['count'])
+            elif d['moved']:
+                self.chain_done()
+            else:
+                self.drop_snapshot()
+            self.redraw()
+            return
+        if self.sdrag is not None:
+            i, moved = self.sdrag
+            self.sdrag = None
+            if moved:
+                self.storm_done()
+            else:
+                self.drop_snapshot()
+            self.redraw()
+            return
+        if self.drag is not None:
+            self.drag = None
+            self.respin(False)
+
+    def drag_reset(self, e):
+        tool = self.map_tool.get()
+        p = self.sheet_xy(e)
+        if tool == 'bands':
+            if not self.placing() or not self.on_flat(p) or self.band_edge_near(p) is not None:
+                return
+            lat = round(self.flat_lat(p[1]), 1)
+            bands = self.P['bands']
+            if any(abs(float(b[0]) - lat) < 0.6 for b in bands):
+                return
+            gg.sort_bands(self.P)
+            idx = max(i for i, b in enumerate(self.P['bands']) if float(b[0]) <= lat)
+            base = self.P['bands'][idx][1]
+            lum = 0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2]
+            col = [int(max(0, min(255, round(c * 0.88 if lum > 150 else c * 1.12 + 8)))) for c in base]
+            self.snapshot()
+            self.P['bands'].append([lat, col])
+            gg.sort_bands(self.P)
+            for ed in self.editors:
+                ed.rebuild()
+            self.bands_changed()
+            self.redraw()
+            self.status('Split the band at %.1f\u00b0 \u2013 pick the new band\u2019s colour in the band list' % lat)
+            return
+        if tool != 'turn':
+            return
+        if self.view.get() == 'bands' and self.live_view is not None and p and (p[0] - 256) ** 2 + (p[1] - 256) ** 2 <= 256 ** 2:
+            self.rot = [0.0, 0.0]
+            self.respin(False)
+
+    def respin(self, quick):
+        self.spin_pending = False
+        lv = self.live_view
+        if lv is None or self.view.get() != 'bands':
+            return
+        sph = self.sphere_image(lv['tex'], lv['em'], lv['light'], 256 if quick else 512)
+        if quick:
+            sph = sph.resize((512, 512), Image.BILINEAR)
+        sheet = lv['sheet'].copy()
+        sheet.paste(sph, (0, 0))
+        self.view_src = sheet
+        self.redraw(fast=quick)
+
+    def update_live_label(self, key=None):
+        if not self.live_on.get():
+            txt = ''
+        elif self.view.get() != 'bands':
+            txt = ''
+        elif self.proc:
+            txt = 'swirls wait while building'
+        elif self.live_err:
+            txt = 'swirls failed: %s' % self.live_err[:60]
+        else:
+            key = key or json.dumps(self.P, sort_keys=True, default=str)
+            L = self.live_last
+            if L is not None and L['key'] == key:
+                txt = 'swirls %d px \u00b7 %.1f s' % (L['W'], L['dt'])
+                if L['W'] < self.live_target():
+                    txt += ' \u2013 sharpening\u2026'
+            else:
+                txt = 'updating swirls\u2026'
+        self.live_lab.configure(text=txt)
+
+    def live_target(self):
+        try:
+            return int(self.live_size.get())
+        except ValueError:
+            return 512
+
+    def live_size_changed(self, _e=None):
+        S = load_settings()
+        S['live_size'] = self.live_target()
+        save_settings(S)
+        self.update_view()
+
+    def request_live(self, key):
+        if not self.live_on.get() or self.view.get() != 'bands':
+            return
+        if self.live_after:
+            self.after_cancel(self.live_after)
+        self.live_after = self.after(350, lambda: self.start_live(key))
+
+    def start_live(self, key):
+        self.live_after = None
+        if self.proc or not self.live_on.get():
+            self.update_live_label(key)
+            return
+        sizes = (256, self.live_target())
+        L = self.live_last
+        if L is not None and L['key'] == key and L['W'] >= sizes[-1]:
+            return
+        P = gg.normalize(copy.deepcopy(self.P))
+        if L is not None and L['fk'] == gg.flow_key(P) and L['W'] > sizes[0]:
+            sizes = sizes[1:]
+        r = self.live_req
+        if r is not None and r[1] == key and r[3] == sizes:
+            return
+        self.live_err = None
+        with self.live_lock:
+            self.live_gen += 1
+            self.live_req = (self.live_gen, key, P, sizes)
+            if self.live_thread is None:
+                self.live_thread = threading.Thread(target=self.live_worker, daemon=True)
+                self.live_thread.start()
+        self.update_live_label(key)
+
+    def stop_live(self):
+        with self.live_lock:
+            self.live_gen += 1
+            self.live_req = None
+
+    def live_worker(self):
+        while True:
+            with self.live_lock:
+                req = self.live_req
+                if req is None:
+                    self.live_thread = None
+                    return
+            gen, key, P, sizes = req
+
+            def cancel(gen=gen):
+                r = self.live_req
+                if r is None or r[0] != gen:
+                    raise gg.Cancelled()
+            try:
+                fk = gg.flow_key(P)
+                for W in sizes:
+                    if W != sizes[-1] and (fk, sizes[-1]) in self.live_cache:
+                        continue
+                    t0 = time.time()
+                    c, e = gg.live_map(P, W, self.live_cache, cancel)
+                    self.live_q.put((gen, key, fk, W, c, e, time.time() - t0))
+            except gg.Cancelled:
+                continue
+            except Exception as ex:
+                self.live_q.put((gen, key, '', 0, None, str(ex), 0))
+            with self.live_lock:
+                if self.live_req is not None and self.live_req[0] == gen:
+                    self.live_req = None
+
+    def live_poll(self):
+        got = False
+        try:
+            while True:
+                gen, key, fk, W, c, e, dt = self.live_q.get_nowait()
+                if c is None:
+                    if gen == self.live_gen:
+                        self.live_err = e
+                        got = True
+                elif gen == self.live_gen:
+                    self.live_last = {'key': key, 'fk': fk, 'W': W, 'col': c, 'em': e, 'dt': dt}
+                    got = True
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+        if got:
+            if self.view.get() == 'bands':
+                self.update_view(from_live=True)
+            else:
+                self.update_live_label()
+            self.ring_schedule()
+        try:
+            self.after(120, self.live_poll)
+        except tk.TclError:
+            pass
+
+    def toggle_live(self):
+        S = load_settings()
+        S['live_swirls'] = bool(self.live_on.get())
+        save_settings(S)
+        if not self.live_on.get():
+            self.stop_live()
+        self.update_view()
+
     def schedule_redraw(self):
         if self.redraw_id:
             self.after_cancel(self.redraw_id)
         self.redraw_id = self.after(60, self.redraw)
 
-    def redraw(self):
+    def redraw(self, fast=False):
         self.redraw_id = None
         self.canvas.delete('all')
         cw, ch = max(10, self.canvas.winfo_width()), max(10, self.canvas.winfo_height())
         if self.view_src is None:
+            self.view_geom = None
             self.canvas.create_text(cw // 2, ch // 2, text='No picture yet', fill=DIM, font=(FONT, 12))
             return
         iw, ih = self.view_src.size
         s = min((cw - 16) / iw, (ch - 16) / ih)
-        im = self.view_src.resize((max(1, int(iw * s)), max(1, int(ih * s))), Image.LANCZOS)
+        w2, h2 = max(1, int(iw * s)), max(1, int(ih * s))
+        im = self.view_src.resize((w2, h2), Image.BILINEAR if fast else Image.LANCZOS)
         self.tkimg = ImageTk.PhotoImage(im)
         self.canvas.create_image(cw // 2, ch // 2, image=self.tkimg)
+        self.view_geom = (w2 / float(iw), cw // 2 - w2 / 2.0, ch // 2 - h2 / 2.0)
+        if self.view.get() == 'bands' and self.map_tool.get() != 'turn' and self.live_view is not None:
+            self.draw_map_marks()
+
+    def flat_xy(self, lat, lon):
+        s, ox, oy = self.view_geom
+        return ox + (536 + (lon % 360.0) / 360.0 * 1024) * s, oy + (90 - lat) / 180.0 * 512 * s
+
+    def mark_storm(self, lat, lon, size, aspect, col, width=2, globe=True):
+        s, ox, oy = self.view_geom
+        cv = self.canvas
+        r = max(5.0, float(size) * 360 * 1024 / 360.0 * 1.1)
+        rx, ry = r * max(1.0, float(aspect)) * s, r * s
+        cx, cy = self.flat_xy(lat, lon)
+        for dx in (-1024 * s, 0, 1024 * s):
+            x = cx + dx
+            if ox + 536 * s - rx <= x <= ox + 1560 * s + rx:
+                cv.create_oval(x - rx, cy - ry, x + rx, cy + ry, outline=col, width=width, dash=(4, 3))
+                cv.create_line(x - 4, cy, x + 5, cy, fill=col, width=width)
+                cv.create_line(x, cy - 4, x, cy + 5, fill=col, width=width)
+        if globe:
+            gx, gy, z = self.globe_xy(lat, lon)
+            if z > 0.05:
+                gr = max(4.0, 256 * np.sin(np.radians(min(80.0, float(size) * 360 * 1.1)))) * s * max(z, 0.3) ** 0.5
+                cv.create_oval(ox + gx * s - gr, oy + gy * s - gr, ox + gx * s + gr, oy + gy * s + gr, outline=col, width=width, dash=(4, 3))
+
+    def draw_map_marks(self):
+        s, ox, oy = self.view_geom
+        cv = self.canvas
+        tool = self.map_tool.get()
+        cv.create_rectangle(ox + 536 * s, oy, ox + 1560 * s, oy + 512 * s, outline=ACC, width=1)
+        if tool == 'bands':
+            act = self.bdrag['i'] if self.bdrag is not None else -1
+            x0, x1 = ox + 536 * s, ox + 1560 * s
+            for i, b in enumerate(self.P['bands']):
+                if i == 0:
+                    continue
+                y = oy + (90 - float(b[0])) / 180.0 * 512 * s
+                col = WARM if i == act else '#ffffff'
+                cv.create_line(x0, y, x1, y, fill=col, width=2 if i == act else 1, dash=() if i == act else (6, 4))
+                cv.create_rectangle(x0 + 4, y - 9, x0 + 56, y + 8, fill='#101318', outline='')
+                cv.create_text(x0 + 8, y, text='%.1f\u00b0' % float(b[0]), fill=col, anchor='w', font=(FONT, 8))
+            return
+        sact = self.sdrag[0] if self.sdrag is not None else -1
+        for i, b in enumerate(self.P.get('big_storms', [])):
+            dim = tool != 'storms'
+            self.mark_storm(float(b['lat']), float(b['lon']), b.get('size', 0.025), b.get('aspect', 1.0),
+                            '#7d8596' if dim else (WARM if i == sact else '#ffffff'), 1 if dim else 2, not dim)
+        cact = self.cdrag['ci'] if (self.cdrag is not None and self.cdrag['mode'] == 'move') else -1
+        for ci, c in enumerate(self.P.get('storm_chains', [])):
+            col = WARM if ci == cact else (ACC if tool == 'chain' else '#7d8596')
+            pts = gg.chain_points(c)
+            for la, lo in pts:
+                self.mark_storm(la, lo, c['size'], c['aspect'], col, 2 if tool == 'chain' else 1, tool == 'chain')
+        if self.cdrag is not None and self.cdrag['mode'] == 'new':
+            c = self.new_chain_from(self.cdrag['a'], self.cdrag['b'])
+            for la, lo in gg.chain_points(c):
+                self.mark_storm(la, lo, c['size'], c['aspect'], WARM, 2, True)
+            ax, ay = self.flat_xy(*self.cdrag['a'])
+            bx, by = self.flat_xy(*self.cdrag['b'])
+            if abs(bx - ax) < 512 * s:
+                cv.create_line(ax, ay, bx, by, fill=WARM, width=1, dash=(2, 3))
 
     def status(self, t):
         self.stat.configure(text=t)
@@ -2434,6 +3747,8 @@ class App(tk.Tk):
             messagebox.showerror('Could not start', str(ex), parent=self)
             return
         self.done_cb = done
+        self.stop_live()
+        self.update_live_label()
         threading.Thread(target=self.reader, args=(self.proc,), daemon=True).start()
         self.set_busy(True)
         self.after(100, self.poll)
@@ -2461,6 +3776,8 @@ class App(tk.Tk):
             self.proc = None
             self.set_busy(False)
             self.done_cb(rc)
+            if self.view.get() == 'bands':
+                self.update_view()
         else:
             self.after(100, self.poll)
 
