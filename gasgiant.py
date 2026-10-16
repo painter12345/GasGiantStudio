@@ -4,7 +4,7 @@ from PIL import Image, ImageFilter, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.6'
+APP_VERSION = '1.1.7'
 VERSION = '4'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -70,6 +70,7 @@ DEFAULTS = {
     'heat_glow': {'strength': 0.0},
     'storm_chains': [],
     'rings': {'enabled': False},
+    'atmosphere': {'enabled': False},
     'edges': [],
     'curl_strength': 12.0,
     'curl_spacing': 6.5,
@@ -495,6 +496,700 @@ def ring_snippet(P, path):
         round(e['inner'] * 1000), round(e['outer'] * 1000), ('%g' % float(e['angle'])), path)
 
 
+ATMO_POINT = {'altitude': 0.0, 'skyExposure': 0.2, 'skyAlpha': 1.0, 'skyExtinctionTint': 1.0, 'scatteringExposure': 0.2,
+              'extinctionThickness': 1.0, 'postProcessAlpha': 1.0, 'postProcessDepth': 0.0, 'extinctionTint': 1.0}
+ATMO_POINT_KEYS = ('altitude', 'skyExposure', 'skyAlpha', 'skyExtinctionTint', 'scatteringExposure', 'extinctionThickness',
+                   'postProcessAlpha', 'postProcessDepth', 'extinctionTint')
+ATMO_VALUES = ('atmosphereStartRadiusScale', 'HR', 'HM', 'm_betaR', 'BETA_MSca', 'm_mieG', 'ozoneAbsorption', 'ozoneHeight',
+               'ozoneFalloff', 'useOzone', 'averageGroundReflectance', 'multipleScattering', 'godrayStrength')
+ATMO_EXTRA = [['flattenScaledSpaceMesh', '0'], ['rimBlend', '20'], ['rimpower', '600'], ['specR', '0'], ['specG', '0'],
+              ['specB', '0'], ['shininess', '0'], ['noonSunlightExtinctionStrength', '1'], ['cloudColorMultiplier', '1'],
+              ['cloudScatteringMultiplier', '0.2'], ['cloudSkyIrradianceMultiplier', '0'], ['volumetricsColorMultiplier', '1'],
+              ['EVEIntegration_preserveCloudColors', 'True'], ['adjustScaledTexture', 'False'], ['scaledLandBrightnessAdjust', '1'],
+              ['scaledLandContrastAdjust', '1'], ['scaledLandSaturationAdjust', '1'], ['scaledOceanBrightnessAdjust', '1'],
+              ['scaledOceanContrastAdjust', '1'], ['scaledOceanSaturationAdjust', '1']]
+ATMO = {'enabled': False, 'radius': 6000.0, 'atmosphereStartRadiusScale': 1.0, 'HR': 46.4, 'HM': 5.57,
+        'm_betaR': [0.002844, 0.008425, 0.002313], 'BETA_MSca': [0.005782, 0.005782, 0.005782], 'm_mieG': 0.85,
+        'useOzone': False, 'ozoneAbsorption': [0.0003426, 0.0008298, 0.000036], 'ozoneHeight': 25.0, 'ozoneFalloff': 15.0,
+        'averageGroundReflectance': 0.1, 'multipleScattering': True, 'godrayStrength': 0.8,
+        'configPoints': [dict(ATMO_POINT)], 'sun': 'Sun', 'sun_color': [255, 255, 255], 'cloud_integration': True,
+        'flat_model': True, 'eclipse_casters': '', 'sun_angle': 55.0, 'view': 'planet', 'extra': None}
+ATMO_PRESETS = {
+    'Jool (stock)': {'atmosphereStartRadiusScale': 0.997, 'HR': 46.40625, 'HM': 5.56875, 'm_betaR': [0.002844, 0.008425, 0.002313],
+                     'BETA_MSca': [0.005782, 0.005782, 0.005782], 'm_mieG': 0.85, 'useOzone': False,
+                     'configPoints': [dict(ATMO_POINT, skyExposure=0.2, scatteringExposure=0.2)]},
+    'Kerbin (stock)': {'atmosphereStartRadiusScale': 1.0, 'HR': 3.84, 'HM': 1.0, 'm_betaR': [0.01534078, 0.0357075, 0.0875489],
+                       'BETA_MSca': [0.01214062, 0.01214062, 0.01214062], 'm_mieG': 0.85, 'useOzone': True,
+                       'ozoneAbsorption': [0.000493594, 0.00142889, 0.0000645469], 'ozoneHeight': 20.0, 'ozoneFalloff': 12.0,
+                       'configPoints': [dict(ATMO_POINT)]},
+    'Earth-like': {'atmosphereStartRadiusScale': 1.0, 'HR': 8.0, 'HM': 1.2, 'm_betaR': [0.0058, 0.0135, 0.0331],
+                   'BETA_MSca': [0.004, 0.004, 0.004], 'm_mieG': 0.8, 'useOzone': True,
+                   'ozoneAbsorption': [0.0003426, 0.0008298, 0.000036], 'ozoneHeight': 25.0, 'ozoneFalloff': 15.0,
+                   'configPoints': [dict(ATMO_POINT)]},
+}
+
+
+def vec3(v, d):
+    try:
+        if isinstance(v, str):
+            v = [float(x) for x in v.replace(' ', '').split(',') if x != '']
+        v = [float(x) for x in v]
+        if len(v) == 1:
+            v = v * 3
+        return [v[0], v[1], v[2]]
+    except (TypeError, ValueError, IndexError):
+        return list(d)
+
+
+def atmo_entry(a):
+    e = copy.deepcopy(ATMO)
+    a = a if isinstance(a, dict) else {}
+    for k, v in a.items():
+        if k in ATMO:
+            e[k] = copy.deepcopy(v)
+    for k in ('m_betaR', 'BETA_MSca', 'ozoneAbsorption'):
+        e[k] = [max(0.0, x) for x in vec3(e[k], ATMO[k])]
+    for k in ('radius', 'atmosphereStartRadiusScale', 'HR', 'HM', 'm_mieG', 'ozoneHeight', 'ozoneFalloff',
+              'averageGroundReflectance', 'godrayStrength', 'sun_angle'):
+        try:
+            e[k] = float(e[k])
+        except (TypeError, ValueError):
+            e[k] = ATMO[k]
+    e['radius'] = max(1.0, e['radius'])
+    e['HR'] = max(0.01, e['HR']); e['HM'] = max(0.01, e['HM'])
+    e['ozoneFalloff'] = max(0.01, e['ozoneFalloff'])
+    e['m_mieG'] = min(max(e['m_mieG'], -0.99), 0.99)
+    for k in ('useOzone', 'multipleScattering', 'enabled', 'cloud_integration', 'flat_model'):
+        e[k] = bool(e[k])
+    pts = []
+    for p in e.get('configPoints') or []:
+        q = dict(ATMO_POINT)
+        if isinstance(p, dict):
+            for k in ATMO_POINT_KEYS:
+                try:
+                    q[k] = float(p.get(k, q[k]))
+                except (TypeError, ValueError):
+                    pass
+        pts.append(q)
+    e['configPoints'] = sorted(pts, key=lambda q: q['altitude']) or [dict(ATMO_POINT)]
+    e['sun_color'] = [int(min(255, max(0, round(float(c))))) for c in vec3(e['sun_color'], ATMO['sun_color'])]
+    if e['view'] not in ('planet', 'limb', 'sunset'):
+        e['view'] = 'planet'
+    if not isinstance(e['extra'], list):
+        e['extra'] = copy.deepcopy(ATMO_EXTRA)
+    e['extra'] = [[str(k), str(v)] for k, v in e['extra'] if str(k) not in ATMO_VALUES and str(k) not in ('name', 'configPoints')]
+    return e
+
+
+def has_atmo(P):
+    return bool((P.get('atmosphere') or {}).get('enabled'))
+
+
+def atmo_top(e):
+    tr = 1000.0 * e['HR'] * np.log(max(np.linalg.norm(e['m_betaR']), 2e-7) / 1e-7)
+    tm = 1000.0 * e['HM'] * np.log(max(np.linalg.norm(e['BETA_MSca']), 2e-7) / 1e-7)
+    t = max(tr, tm)
+    if e['useOzone']:
+        t = max(t, 1000.0 * (e['ozoneHeight'] + e['ozoneFalloff']))
+    return t / 1000.0
+
+
+class AtmoModel:
+    def __init__(self, e):
+        R = e['radius']
+        self.Rg = float(e['atmosphereStartRadiusScale'])
+        self.Rt = self.Rg + atmo_top(e) / R
+        self.HR = e['HR'] / R; self.HM = e['HM'] / R
+        self.bR = np.array(e['m_betaR'], np.float32) * np.float32(R)
+        self.bM = np.array(e['BETA_MSca'], np.float32) * np.float32(R)
+        self.bMe = self.bM / np.float32(0.9)
+        self.oz = bool(e['useOzone'])
+        self.bO = np.array(e['ozoneAbsorption'], np.float32) * np.float32(R)
+        self.oH = e['ozoneHeight'] / R; self.oF = e['ozoneFalloff'] / R
+        self.g = float(e['m_mieG'])
+        self.albedo = float(e['averageGroundReflectance'])
+        self.H = np.sqrt(self.Rt ** 2 - self.Rg ** 2)
+        self.trans_lut()
+        self.ms = self.ms_lut() if e['multipleScattering'] else None
+
+    def dens(self, r):
+        h = np.maximum(r - np.float32(self.Rg), 0)
+        dR = np.exp(-h / np.float32(self.HR))
+        dM = np.exp(-h / np.float32(self.HM))
+        dO = np.maximum(0, 1 - np.abs(h - np.float32(self.oH)) / np.float32(self.oF)) if self.oz else None
+        return dR, dM, dO
+
+    def ext(self, dR, dM, dO):
+        s = dR[..., None] * self.bR + dM[..., None] * self.bMe
+        if dO is not None:
+            s = s + dO[..., None] * self.bO
+        return s
+
+    def trans_lut(self, nr=64, nm=256, steps=96):
+        Rg, Rt, H = self.Rg, self.Rt, self.H
+        xr = np.linspace(0, 1, nr, dtype=np.float64)
+        xm = np.linspace(0, 1, nm, dtype=np.float64)
+        rho = H * xr
+        r = np.sqrt(rho ** 2 + Rg ** 2)[:, None]
+        dmin = (Rt - r); dmax = rho[:, None] + H
+        d = dmin + xm[None, :] * (dmax - dmin)
+        mu = np.where(d > 0, (H * H - rho[:, None] ** 2 - d * d) / np.maximum(2 * r * d, 1e-12), 1.0)
+        mu = np.clip(mu, -1, 1)
+        tau = np.zeros((nr, nm, 3), np.float32)
+        for i in range(steps):
+            t = (i + 0.5) / steps * d
+            ri = np.sqrt(np.maximum(t * t + 2 * r * mu * t + r * r, 0)).astype(np.float32)
+            tau += self.ext(*self.dens(ri)) * (d / steps).astype(np.float32)[..., None]
+        self.tau = tau
+        self.nr, self.nm = nr, nm
+
+    def sun_t(self, r, mu):
+        Rg, Rt, H = self.Rg, self.Rt, self.H
+        r = np.clip(r, Rg, Rt).astype(np.float32)
+        rho = np.sqrt(np.maximum(r * r - np.float32(Rg * Rg), 0))
+        disc = r * r * (mu * mu - 1) + np.float32(Rt * Rt)
+        d = np.maximum(-r * mu + np.sqrt(np.maximum(disc, 0)), 0)
+        dmin = np.float32(Rt) - r; dmax = rho + np.float32(H)
+        xm = np.clip((d - dmin) / np.maximum(dmax - dmin, 1e-9), 0, 1) * (self.nm - 1)
+        xr = np.clip(rho / np.float32(H), 0, 1) * (self.nr - 1)
+        i0 = np.minimum(xr.astype(np.int32), self.nr - 2); fr = (xr - i0)[..., None]
+        j0 = np.minimum(xm.astype(np.int32), self.nm - 2); fm = (xm - j0)[..., None]
+        T = self.tau
+        tau = (T[i0, j0] * (1 - fm) + T[i0, j0 + 1] * fm) * (1 - fr) + (T[i0 + 1, j0] * (1 - fm) + T[i0 + 1, j0 + 1] * fm) * fr
+        hor = -np.sqrt(np.maximum(1 - (np.float32(Rg) / r) ** 2, 0))
+        lit = np.clip((mu - hor) / np.float32(0.004) + 0.5, 0, 1)
+        lit = lit * lit * (3 - 2 * lit)
+        return np.exp(-tau) * lit[..., None]
+
+    def ms_lut(self, nr=16, nm=24, nd=48, steps=16):
+        Rg, Rt = self.Rg, self.Rt
+        xr = np.linspace(0, 1, nr)
+        rr = Rg + (Rt - Rg) * xr ** 2
+        ms = np.linspace(-1, 1, nm)
+        k = np.arange(nd) + 0.5
+        cz = 1 - 2 * k / nd
+        phi = np.pi * (1 + 5 ** 0.5) * k
+        sz = np.sqrt(1 - cz * cz)
+        D = np.stack([sz * np.cos(phi), sz * np.sin(phi), cz], -1)
+        R_, M_, K_ = np.meshgrid(rr, ms, np.arange(nd), indexing='ij')
+        d = D[K_]
+        r0 = R_
+        mu = d[..., 2]
+        disc_g = r0 * r0 * (mu * mu - 1) + Rg * Rg
+        tg = -r0 * mu - np.sqrt(np.maximum(disc_g, 0))
+        hit = (disc_g >= 0) & (tg > 0)
+        tt = -r0 * mu + np.sqrt(np.maximum(r0 * r0 * (mu * mu - 1) + Rt * Rt, 0))
+        tmax = np.where(hit, tg, tt)
+        sun = np.stack([np.sqrt(1 - M_ * M_), np.zeros_like(M_), M_], -1)
+        L2 = np.zeros(R_.shape + (3,), np.float32)
+        Lf = np.zeros(R_.shape + (3,), np.float32)
+        Tv = np.ones(R_.shape + (3,), np.float32)
+        pu = np.float32(1 / (4 * np.pi))
+        for i in range(steps):
+            t = (i + 0.5) / steps * tmax
+            ds = (tmax / steps).astype(np.float32)[..., None]
+            px = d[..., 0] * t; py = d[..., 1] * t; pz = r0 + d[..., 2] * t
+            r = np.sqrt(px * px + py * py + pz * pz).astype(np.float32)
+            mus = ((px * sun[..., 0] + pz * sun[..., 2]) / r).astype(np.float32)
+            dR, dM, dO = self.dens(r)
+            se = self.ext(dR, dM, dO)
+            ss = dR[..., None] * self.bR + dM[..., None] * self.bM
+            st = np.exp(-se * ds)
+            w = np.where(se > 1e-9, (1 - st) / np.maximum(se, 1e-9), ds)
+            Ts = self.sun_t(r, mus)
+            L2 += Tv * ss * Ts * pu * w
+            Lf += Tv * ss * w
+            Tv *= st
+        gx = d[..., 0] * tmax; gy = d[..., 1] * tmax; gz = r0 + d[..., 2] * tmax
+        gr = np.sqrt(gx * gx + gy * gy + gz * gz)
+        gmu = (gx * sun[..., 0] + gz * sun[..., 2]) / np.maximum(gr, 1e-9)
+        Tg = self.sun_t(gr.astype(np.float32), gmu.astype(np.float32))
+        L2 += np.where(hit[..., None], Tv * Tg * np.maximum(gmu, 0)[..., None] * np.float32(self.albedo / np.pi), 0)
+        L2n = L2.mean(2); fms = np.clip(Lf.mean(2), 0, 0.98)
+        self.ms_nr, self.ms_nm = nr, nm
+        return (L2n / (1 - fms)).astype(np.float32)
+
+    def ms_at(self, r, mus):
+        xr = np.sqrt(np.clip((r - np.float32(self.Rg)) / np.float32(self.Rt - self.Rg), 0, 1)) * (self.ms_nr - 1)
+        xm = np.clip((mus + 1) * 0.5, 0, 1) * (self.ms_nm - 1)
+        i0 = np.minimum(xr.astype(np.int32), self.ms_nr - 2); fr = (xr - i0)[..., None]
+        j0 = np.minimum(xm.astype(np.int32), self.ms_nm - 2); fm = (xm - j0)[..., None]
+        T = self.ms
+        return (T[i0, j0] * (1 - fm) + T[i0, j0 + 1] * fm) * (1 - fr) + (T[i0 + 1, j0] * (1 - fm) + T[i0 + 1, j0 + 1] * fm) * fr
+
+    def phases(self, nu):
+        pr = 3.0 / (16 * np.pi) * (1 + nu * nu)
+        g = self.g
+        pm = 1.5 / (4 * np.pi) * (1 - g * g) * (1 + g * g - 2 * g * nu) ** -1.5 * (1 + nu * nu) / (2 + g * g)
+        return np.float32(pr), np.float32(pm)
+
+    def jlut(self, nu, nr=192, nm=384):
+        Rg, Rt = self.Rg, self.Rt
+        xr = np.linspace(0, 1, nr, dtype=np.float32)
+        r = (np.float32(Rg) + np.float32(Rt - Rg) * xr * xr)[:, None] * np.ones((1, nm), np.float32)
+        mus = np.linspace(-1, 1, nm, dtype=np.float32)[None, :] * np.ones((nr, 1), np.float32)
+        pr, pm = self.phases(nu)
+        dR, dM, dO = self.dens(r)
+        sR = dR[..., None] * self.bR; sM = dM[..., None] * self.bM
+        J = self.sun_t(r, mus) * (sR * pr + sM * pm)
+        if self.ms is not None:
+            J = J + (sR + sM) * self.ms_at(r, mus)
+        self.Jc = np.ascontiguousarray(J.reshape(-1, 3).T.astype(np.float32))
+        self.j_nr, self.j_nm = nr, nm
+        self.cR = self.bR[:, None]; self.cMe = self.bMe[:, None]; self.cO = self.bO[:, None]
+
+    def j_at(self, r, mus):
+        nr, nm = self.j_nr, self.j_nm
+        xr = np.sqrt(np.maximum(r - np.float32(self.Rg), 0) * np.float32((nr - 1) ** 2 / (self.Rt - self.Rg)))
+        xm = mus * np.float32(0.5 * (nm - 1)) + np.float32(0.5 * (nm - 1))
+        i0 = np.minimum(xr.astype(np.int32), nr - 2)
+        j0 = np.minimum(xm.astype(np.int32), nm - 2)
+        fr = xr - i0; fm = xm - j0
+        k = i0 * nm + j0
+        J = self.Jc
+        a = np.take(J, k, axis=1); b = np.take(J, k + 1, axis=1)
+        c = np.take(J, k + nm, axis=1); d = np.take(J, k + nm + 1, axis=1)
+        x0 = a + (c - a) * fr
+        return x0 + (b + (d - b) * fr - x0) * fm
+
+    def march(self, u, v, s0, s1, L, n, dense_end, cancel=None):
+        b2 = (u * u + v * v).astype(np.float32)
+        Lin = np.zeros((3,) + u.shape, np.float32)
+        Tv = np.ones((3,) + u.shape, np.float32)
+        ln = (s1 - s0).astype(np.float32)
+        lx, ly, lz = np.float32(L[0]), np.float32(L[1]), np.float32(L[2])
+        uv = u * lx + v * ly
+        for i in range(n):
+            if cancel and i % 4 == 0:
+                cancel()
+            a = (i + 0.5) / n; a1 = (i + 1.0) / n; a0 = i / float(n)
+            if dense_end:
+                f = 1 - (1 - a) ** 2; ds = ln * np.float32((1 - a0) ** 2 - (1 - a1) ** 2)
+            else:
+                f = a * a; ds = ln * np.float32(a1 * a1 - a0 * a0)
+            s = s0 + ln * np.float32(f)
+            r = np.sqrt(b2 + s * s)
+            mus = (uv - s * lz) / r
+            dR, dM, dO = self.dens(r)
+            x = self.cR * (dR * ds) + self.cMe * (dM * ds)
+            if dO is not None:
+                x += self.cO * (dO * ds)
+            np.maximum(x, np.float32(1e-20), out=x)
+            em = np.expm1(-x)
+            Lin += Tv * self.j_at(r, mus) * (-em / x * ds)
+            Tv *= 1 + em
+        return Lin.T, Tv.T
+
+
+def scatterer_hdr(L, exposure):
+    L = L * np.float32(exposure)
+    return np.where(L < 1.413, np.power(np.maximum(L * 0.38317, 0), 1 / 2.2), 1 - np.exp(-L)).astype(np.float32)
+
+
+def sphere_sample(tex, x, y, z, tilt, vlat, vlon):
+    H, W = tex.shape[:2]
+    t = np.radians(tilt); cu, su = np.cos(t), np.sin(t)
+    u2 = x * cu - y * su; v2 = x * su + y * cu
+    a = np.radians(vlat); cl, sl = np.cos(a), np.sin(a)
+    y3 = v2 * cl + z * sl; z3 = -v2 * sl + z * cl
+    lat = np.arcsin(np.clip(y3, -1, 1)); lon = np.arctan2(u2, z3) + np.radians(vlon)
+    fx = (lon / (2 * np.pi)) % 1 * W - 0.5
+    fy = np.clip((0.5 - lat / np.pi) * H - 0.5, 0, H - 1.001)
+    x0 = np.floor(fx).astype(np.int32); y0 = fy.astype(np.int32)
+    ax = (fx - x0).astype(np.float32)[:, None]; ay = (fy - y0).astype(np.float32)[:, None]
+    x0 %= W; x1 = (x0 + 1) % W; y1 = np.minimum(y0 + 1, H - 1)
+    top = tex[y0, x0] * (1 - ax) + tex[y0, x1] * ax
+    bot = tex[y1, x0] * (1 - ax) + tex[y1, x1] * ax
+    return top * (1 - ay) + bot * ay
+
+
+ATMO_CACHE = {}
+
+
+def atmo_model(e):
+    key = json.dumps([e[k] for k in ATMO_VALUES] + [e['radius']], default=str)
+    m = ATMO_CACHE.get(key)
+    if m is None:
+        m = AtmoModel(e)
+        ATMO_CACHE[key] = m
+        while len(ATMO_CACHE) > 4:
+            ATMO_CACHE.pop(next(iter(ATMO_CACHE)))
+    return m
+
+
+def atmo_light(e, ang=None):
+    ph = np.radians(float(e['sun_angle'] if ang is None else ang)); ps = np.radians(18.0)
+    return np.array([np.sin(ph) * np.cos(ps), np.sin(ph) * np.sin(ps), np.cos(ph)], np.float32)
+
+
+def atmo_frame(e, view, w, h, m):
+    L = atmo_light(e)
+    if view == 'planet':
+        half = 1.0 + max(0.07, min(7 * max(m.HR, m.HM), m.Rt - 1.0 + 0.02))
+        sc = min(w, h) / (2 * half)
+        X = (np.arange(w, dtype=np.float32) + 0.5 - w / 2) / np.float32(sc)
+        Y = (h / 2 - np.arange(h, dtype=np.float32) - 0.5) / np.float32(sc)
+        u, v = np.meshgrid(X, Y)
+        return u, v, 1.0 / sc
+    if view == 'limb':
+        n = np.array([L[0], L[1]], np.float64)
+    else:
+        n = np.array([-L[1], L[0]], np.float64)
+    nn = np.linalg.norm(n)
+    n = n / nn if nn > 1e-6 else np.array([1.0, 0.0])
+    t = np.array([-n[1], n[0]])
+    span = float(np.clip(30 * max(m.HR, m.HM), 0.05, 0.6))
+    sc = w / span
+    X = (np.arange(w, dtype=np.float32) + 0.5 - w / 2) / np.float32(sc)
+    Y = (h * 0.62 - np.arange(h, dtype=np.float32) - 0.5) / np.float32(sc)
+    Xg, Yg = np.meshgrid(X, Y)
+    r0 = 1.0
+    u = (n[0] * r0 + Xg * t[0] + Yg * n[0]).astype(np.float32)
+    v = (n[1] * r0 + Xg * t[1] + Yg * n[1]).astype(np.float32)
+    return u, v, 1.0 / sc
+
+
+def render_atmo(P, tex, emis=None, view=None, w=560, h=360, rot=(0.0, 0.0), steps=16, chunk=60000, cancel=None):
+    e = atmo_entry(P.get('atmosphere'))
+    m = atmo_model(e)
+    view = view or e['view']
+    pt = e['configPoints'][-1]
+    L = atmo_light(e)
+    sun = np.array(e['sun_color'], np.float32) / 255 * np.float32(100.0)
+    u, v, px = atmo_frame(e, view, w, h, m)
+    m.jlut(-float(L[2]))
+    b = np.sqrt(u * u + v * v)
+    out = np.zeros((h, w, 3), np.float32)
+    cov = np.clip((1 - b) / np.float32(px) + 0.5, 0, 1)
+    pv = P.get('preview', {'tilt': 0, 'view_lat': 0, 'view_lon': 0})
+    tilt = float(pv.get('tilt', 0)); vlat = max(-90.0, min(90.0, float(pv.get('view_lat', 0)) + rot[1])); vlon = float(pv.get('view_lon', 0)) + rot[0]
+    gi = np.nonzero((cov > 0).ravel())[0]
+    si = np.nonzero(((cov < 1) & (b < m.Rt)).ravel())[0]
+    uf, vf, bf = u.ravel(), v.ravel(), b.ravel()
+    flat = out.reshape(-1, 3)
+    covf = cov.ravel()
+    for c0 in range(0, len(gi), chunk):
+        idx = gi[c0:c0 + chunk]
+        bb = np.minimum(bf[idx], np.float32(1 - 1e-5))
+        sc_ = bb / np.maximum(bf[idx], 1e-9)
+        uu = uf[idx] * sc_; vv = vf[idx] * sc_
+        zg = np.sqrt(np.maximum(1 - bb * bb, 0)).astype(np.float32)
+        s0 = -np.sqrt(np.maximum(np.float32(m.Rt ** 2) - bb * bb, 0)).astype(np.float32)
+        s1 = -zg
+        Lin, Tv = m.march(uu, vv, s0, s1, L, steps, True, cancel)
+        nd = np.clip(uu * L[0] + vv * L[1] + zg * L[2], 0, 1)
+        C = sphere_sample(tex, uu, vv, zg, tilt, vlat, vlon) * nd[:, None]
+        if emis is not None:
+            C = C + sphere_sample(emis, uu, vv, zg, tilt, vlat, vlon) * (1 - 0.8 * nd)[:, None]
+        C = np.clip(C, 0, 1)
+        E = Tv
+        avg = E.mean(1, keepdims=True)
+        E = np.float32(pt['extinctionTint']) * E + np.float32(1 - pt['extinctionTint']) * avg
+        E = np.maximum(0, np.float32(1 - pt['extinctionThickness']) + np.float32(pt['extinctionThickness']) * E)
+        S = scatterer_hdr(Lin * sun, pt['scatteringExposure'])
+        CE = C * E
+        flat[idx] += (CE + S * (1 - CE)) * covf[idx][:, None]
+    for c0 in range(0, len(si), chunk):
+        idx = si[c0:c0 + chunk]
+        bb = np.maximum(bf[idx], np.float32(max(1.0, m.Rg) + 1e-6))
+        sc_ = bb / np.maximum(bf[idx], 1e-9)
+        uu = uf[idx] * sc_; vv = vf[idx] * sc_
+        sm = np.sqrt(np.maximum(np.float32(m.Rt ** 2) - bb * bb, 0)).astype(np.float32)
+        z0 = np.zeros_like(sm)
+        La, Ta = m.march(uu, vv, -sm, z0, L, steps, True, cancel)
+        Lb, Tb = m.march(uu, vv, z0, sm, L, steps, False, cancel)
+        Lin = La + Ta * Lb
+        S = scatterer_hdr(Lin * sun, pt['skyExposure']) * np.float32(pt['skyAlpha'])
+        flat[idx] += S * (1 - covf[idx])[:, None]
+    img = np.clip(out * 255 + 0.5, 0, 255).astype(np.uint8)
+    return Image.fromarray(img)
+
+
+def cfg_num(v):
+    v = float('%.7g' % float(v))
+    if v == int(v) and abs(v) < 1e15:
+        return str(int(v))
+    return np.format_float_positional(np.float64(v), trim='-')
+
+
+def cfg_vec(v):
+    return ','.join(cfg_num(x) for x in v)
+
+
+def cfg_val(v):
+    if isinstance(v, bool):
+        return 'True' if v else 'False'
+    if isinstance(v, (list, tuple)):
+        return cfg_vec(v)
+    return cfg_num(v)
+
+
+def atmo_cfg(P, name=None):
+    e = atmo_entry(P.get('atmosphere'))
+    name = name or P['name']
+    out = ['Scatterer_atmosphere', '{', '\tAtmo', '\t{', '\t\tname = %s' % name]
+    for k in ATMO_VALUES:
+        out.append('\t\t%s = %s' % (k, cfg_val(e[k])))
+    for k, v in e['extra']:
+        out.append('\t\t%s = %s' % (k, v))
+    out += ['\t\tconfigPoints', '\t\t{']
+    for p in e['configPoints']:
+        out += ['\t\t\tItem', '\t\t\t{'] + ['\t\t\t\t%s = %s' % (k, cfg_num(p[k])) for k in ATMO_POINT_KEYS] + ['\t\t\t}']
+    out += ['\t\t}', '\t}', '}']
+    return '\n'.join(out) + '\n'
+
+
+def atmo_casters(e):
+    return [c.strip() for c in str(e.get('eclipse_casters') or '').replace(';', ',').split(',') if c.strip()]
+
+
+def atmo_planets(P, name=None):
+    e = atmo_entry(P.get('atmosphere'))
+    name = name or P['name']
+    t = '\t\t\t'
+    out = ['@Scatterer_planetsList:AFTER[Kopernicus]', '{', '\t@scattererCelestialBodies', '\t{', '\t\tItem', '\t\t{',
+           t + 'celestialBodyName = ' + name, t + 'transformName = ' + name,
+           t + 'loadDistance = 1000000000', t + 'unloadDistance = 2000000000', t + 'hasOcean = False',
+           t + 'flatScaledSpaceModel = ' + cfg_val(bool(e['flat_model'])),
+           t + 'usesCloudIntegration = ' + cfg_val(bool(e['cloud_integration'])),
+           t + 'mainSunCelestialBody = ' + (str(e['sun']).strip() or 'Sun')]
+    if list(e['sun_color']) != [255, 255, 255]:
+        out.append(t + 'sunColor = %s,1' % cfg_vec([round(c / 255.0, 3) for c in e['sun_color']]))
+    out.append(t + 'sunsUseIntensityCurves = False')
+    cs = atmo_casters(e)
+    if cs:
+        out += [t + 'eclipseCasters', t + '{'] + [t + '\tItem = ' + c for c in cs] + [t + '}']
+    out += ['\t\t}', '\t}', '}']
+    return '\n'.join(out) + '\n'
+
+
+def parse_cfg(text):
+    root = {'name': '', 'values': [], 'nodes': []}
+    stack = [root]
+    pending = ''
+    for raw in text.replace('﻿', '').splitlines():
+        line = raw.split('//', 1)[0].strip()
+        while line:
+            if line[0] == '{':
+                node = {'name': pending, 'values': [], 'nodes': []}
+                stack[-1]['nodes'].append(node)
+                stack.append(node)
+                pending = ''
+                line = line[1:].strip()
+                continue
+            if line[0] == '}':
+                if len(stack) > 1:
+                    stack.pop()
+                pending = ''
+                line = line[1:].strip()
+                continue
+            cut = [i for i in (line.find('{'), line.find('}')) if i >= 0]
+            seg, line = (line[:min(cut)], line[min(cut):]) if cut else (line, '')
+            seg = seg.strip()
+            if '=' in seg:
+                k, v = seg.split('=', 1)
+                stack[-1]['values'].append((k.strip(), v.strip()))
+                pending = ''
+            elif seg:
+                pending = seg
+    return root
+
+
+def cfg_base(name):
+    n = name.lstrip('@!%+-').split(':')[0]
+    return n.split('[')[0].strip()
+
+
+def cfg_get(node, key, default=None):
+    for k, v in node['values']:
+        if k == key:
+            return v
+    return default
+
+
+def cfg_walk(node, name):
+    for n in node['nodes']:
+        if cfg_base(n['name']) == name:
+            yield n
+        for x in cfg_walk(n, name):
+            yield x
+
+
+def cfg_bool(v, default):
+    if v is None:
+        return default
+    return str(v).strip().lower() in ('true', '1', 'yes')
+
+
+def atmo_from_cfg(text, body=None):
+    root = parse_cfg(text)
+    atmos = list(cfg_walk(root, 'Atmo'))
+    if not atmos:
+        return None, None
+    pick = next((a for a in atmos if body and cfg_get(a, 'name') == body), atmos[0])
+    e = copy.deepcopy(ATMO)
+    extra = []
+    for k, v in pick['values']:
+        if k == 'name':
+            continue
+        if k in ('m_betaR', 'BETA_MSca', 'ozoneAbsorption'):
+            e[k] = vec3(v, ATMO[k])
+        elif k in ('useOzone', 'multipleScattering'):
+            e[k] = cfg_bool(v, ATMO[k])
+        elif k in ATMO_VALUES:
+            try:
+                e[k] = float(v)
+            except ValueError:
+                pass
+        else:
+            extra.append([k, v])
+    e['extra'] = extra
+    pts = []
+    for cp in cfg_walk(pick, 'configPoints'):
+        for it in cfg_walk(cp, 'Item'):
+            q = dict(ATMO_POINT)
+            for k, v in it['values']:
+                if k in q:
+                    try:
+                        q[k] = float(v)
+                    except ValueError:
+                        pass
+            pts.append(q)
+        break
+    if pts:
+        e['configPoints'] = pts
+    return e, cfg_get(pick, 'name')
+
+
+def planets_item(text, body):
+    root = parse_cfg(text)
+    for it in cfg_walk(root, 'Item'):
+        if cfg_get(it, 'celestialBodyName') == body:
+            d = {'sun': cfg_get(it, 'mainSunCelestialBody', 'Sun'),
+                 'cloud_integration': cfg_bool(cfg_get(it, 'usesCloudIntegration'), True),
+                 'flat_model': cfg_bool(cfg_get(it, 'flatScaledSpaceModel'), True)}
+            sc = cfg_get(it, 'sunColor')
+            if sc:
+                c = vec3(sc, [1, 1, 1])
+                d['sun_color'] = [int(round(min(1.0, max(0.0, x)) * 255)) for x in c]
+            ec = [v for n in cfg_walk(it, 'eclipseCasters') for k, v in n['values'] if k == 'Item']
+            d['eclipse_casters'] = ', '.join(ec)
+            return d
+    return None
+
+
+def cfg_files(folder, needle=None, limit=4000):
+    out = []
+    for dp, dn, fn in os.walk(folder):
+        dn[:] = [d for d in dn if d.lower() not in ('plugindata', 'cache', 'textures', 'models')]
+        for f in fn:
+            if f.lower().endswith('.cfg'):
+                p = os.path.join(dp, f)
+                try:
+                    with open(p, encoding='utf-8', errors='replace') as fh:
+                        t = fh.read()
+                except OSError:
+                    continue
+                if needle is None or needle in t:
+                    out.append((p, t))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def game_mod_dir():
+    d = texture_dir()
+    return mod_root(d) if d else ''
+
+
+def scatterer_dir(mod):
+    if not mod:
+        return ''
+    for n in os.listdir(mod) if os.path.isdir(mod) else []:
+        if n.lower() == 'scatterer' and os.path.isdir(os.path.join(mod, n)):
+            return os.path.join(mod, n)
+    return ''
+
+
+def find_atmo_cfg(body, mod=None):
+    mod = mod if mod is not None else game_mod_dir()
+    sd = scatterer_dir(mod)
+    if not sd:
+        return ''
+    p = os.path.join(sd, 'Planets', body, 'atmo.cfg')
+    if os.path.isfile(p):
+        return p
+    for path, t in cfg_files(sd, body):
+        if 'Scatterer_atmosphere' in t:
+            e, nm = atmo_from_cfg(t, body)
+            if e is not None and nm == body:
+                return path
+    return ''
+
+
+def find_planets_item(body, folder):
+    for path, t in cfg_files(folder, body):
+        if 'scattererCelestialBodies' in t:
+            d = planets_item(t, body)
+            if d:
+                return d, path
+    return None, ''
+
+
+def find_body_radius(body, mod=None):
+    mod = mod if mod is not None else game_mod_dir()
+    if not mod or not os.path.isdir(mod):
+        return None, ''
+    for path, t in cfg_files(mod, body):
+        if 'Body' not in t:
+            continue
+        for b in cfg_walk(parse_cfg(t), 'Body'):
+            nm = cfg_get(b, 'name')
+            if nm is None and '[' in b['name']:
+                nm = b['name'].split('[', 1)[1].split(']', 1)[0]
+            if nm != body:
+                continue
+            for pr in cfg_walk(b, 'Properties'):
+                r = cfg_get(pr, 'radius')
+                if r:
+                    try:
+                        return float(r) / 1000.0, path
+                    except ValueError:
+                        pass
+    return None, ''
+
+
+def colour_from_beta(b):
+    b = np.maximum(np.array(b, np.float64), 0)
+    if b.max() <= 0:
+        return [255, 255, 255]
+    c = (b / b.max()) ** (1 / 2.2)
+    return [int(round(x * 255)) for x in c]
+
+
+def beta_from_colour(rgb, old):
+    c = np.maximum(np.array(rgb, np.float64) / 255.0, 0.004) ** 2.2
+    mag = max(float(np.linalg.norm(old)), 1e-5)
+    b = c / np.linalg.norm(c) * mag
+    return [float('%.6g' % x) for x in b]
+
+
+def planet_tint(P):
+    bands = sorted(P['bands'], key=lambda b: b[0])
+    lats = [b[0] for b in bands] + [90]
+    acc = np.zeros(3); wsum = 0.0
+    for i, b in enumerate(bands):
+        lo, hi = max(-90.0, float(lats[i])), min(90.0, float(lats[i + 1]))
+        if hi <= lo:
+            continue
+        w = np.sin(np.radians(hi)) - np.sin(np.radians(lo))
+        acc += w * np.array(b[1], np.float64); wsum += w
+    m = acc / max(wsum, 1e-9)
+    grey = m.mean()
+    m = grey + (m - grey) * 1.6
+    return [int(round(min(255, max(0, x)))) for x in m]
+
+
 def emission_entry(em):
     e = dict(EMISSION)
     e.update({k: v for k, v in em.items() if k in EMISSION})
@@ -570,6 +1265,7 @@ def normalize(P):
     P['heat_glow'] = heat_entry(P.get('heat_glow'))
     P['storm_chains'] = [chain_entry(c) for c in P.get('storm_chains', [])]
     P['rings'] = ring_entry(P.get('rings'))
+    P['atmosphere'] = atmo_entry(P.get('atmosphere'))
     P.pop('glows', None)
     sort_bands(P)
     return P
@@ -1387,9 +2083,10 @@ EXPORT_FORMATS = {
     'emissive': [DDS_BC1, DDS_BC3, DDS_BC7, 'PNG'],
     'preview': ['PNG', 'JPG'],
     'ring': [DDS_BC3, DDS_BC7, 'PNG'],
+    'atmo': ['Scatterer cfg'],
 }
 FMT_EXT = {DDS_BC1: '.dds', DDS_BC3: '.dds', DDS_BC7: '.dds', DDS_NM: '.dds', DDS_BC5: '.dds', 'PNG': '.png',
-           'JPG': '.jpg', 'TGA': '.tga', 'BMP': '.bmp', 'truecolor (EVE)': '.truecolor'}
+           'JPG': '.jpg', 'TGA': '.tga', 'BMP': '.bmp', 'truecolor (EVE)': '.truecolor', 'Scatterer cfg': '.cfg'}
 PIL_FMT = {'PNG': 'PNG', 'JPG': 'JPEG', 'TGA': 'TGA', 'BMP': 'BMP'}
 
 
@@ -1397,15 +2094,32 @@ def export_target(folder, base, fmt):
     return os.path.join(folder, base + FMT_EXT[fmt])
 
 
+def planets_file(folder, name):
+    return os.path.join(folder, 'planetsList_%s.cfg' % name)
+
+
 def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print):
     os.makedirs(folder, exist_ok=True)
-    c = np.asarray(Image.open(os.path.join(src_dir, name + '_color.png')).convert('RGB'))
-    if size and size != c.shape[1]:
-        c = np.asarray(Image.fromarray(c).resize((size, size // 2), Image.LANCZOS))
+    c = None
+    if any(k not in ('atmo', 'preview', 'ring') for k, _, _ in jobs):
+        c = np.asarray(Image.open(os.path.join(src_dir, name + '_color.png')).convert('RGB'))
+        if size and size != c.shape[1]:
+            c = np.asarray(Image.fromarray(c).resize((size, size // 2), Image.LANCZOS))
     written = []
     for kind, base, fmt in jobs:
         path = export_target(folder, base, fmt)
-        if kind == 'color':
+        if kind == 'atmo':
+            if not has_atmo(P):
+                log('no atmosphere on this planet - skipped')
+                continue
+            with open(path, 'w', newline='\n') as f:
+                f.write(atmo_cfg(P, name))
+            pl = planets_file(folder, name)
+            with open(pl, 'w', newline='\n') as f:
+                f.write(atmo_planets(P, name))
+            written.append(pl)
+            log('exported ' + pl)
+        elif kind == 'color':
             if fmt.startswith('DDS'):
                 save_colour_dds(c, path, DDS_CODEC.get(fmt, 'DXT1'), flip)
             elif fmt == 'JPG':
@@ -1527,7 +2241,12 @@ def write_preview(cimg, P, path, eimg=None):
         em = eimg.astype(np.float32) / 255
     pv = P['preview']
     sheet = Image.new('RGB', (2400, 1200))
-    sheet.paste(render_sphere(tex, 800, pv['tilt'], pv['view_lat'], pv['view_lon'], em, NIGHT_LIGHT if has_heat(P) else None), (0, 0))
+    if has_atmo(P):
+        t2 = tex if tex.shape[1] <= 2048 else np.asarray(Image.fromarray(cimg).resize((2048, 1024), Image.LANCZOS)).astype(np.float32) / 255
+        e2 = em if em is None or em.shape[1] <= 2048 else np.asarray(Image.fromarray(eimg).resize((2048, 1024), Image.LANCZOS)).astype(np.float32) / 255
+        sheet.paste(render_atmo(P, t2, e2, view='planet', w=800, h=800, steps=24), (0, 0))
+    else:
+        sheet.paste(render_sphere(tex, 800, pv['tilt'], pv['view_lat'], pv['view_lon'], em, NIGHT_LIGHT if has_heat(P) else None), (0, 0))
     sheet.paste(Image.fromarray(cimg).resize((1600, 800), Image.LANCZOS), (800, 0))
     sheet.paste(render_sphere(tex, 400, 0, 75, 0, em), (0, 800))
     sheet.paste(render_sphere(tex, 400, 0, -75, 0, em), (400, 800))
@@ -1969,11 +2688,14 @@ def cmd_export(a):
             'flow': {'truecolor': 'truecolor (EVE)', 'png': 'PNG'},
             'emissive': {'dds': DDS_BC1, 'bc1': DDS_BC1, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
             'preview': {'png': 'PNG', 'jpg': 'JPG'},
-            'ring': {'dds': DDS_BC3, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'}}
+            'ring': {'dds': DDS_BC3, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
+            'atmo': {'cfg': 'Scatterer cfg'}}
     jobs = []
-    for kind in ('color', 'normal', 'flow', 'emissive', 'preview', 'ring'):
+    for kind in ('color', 'normal', 'flow', 'emissive', 'preview', 'ring', 'atmo'):
         f = getattr(a, kind)
         if f and f != 'none':
+            if kind == 'atmo' and not has_atmo(P):
+                continue
             jobs.append((kind, '%s_%s' % (name, kind), pick[kind][f]))
     export_maps(src, name, P, jobs, a.to, a.size or None, not a.no_flip)
 
@@ -2079,6 +2801,7 @@ def main():
     e.add_argument('--emissive', default='dds', choices=['dds', 'bc1', 'bc3', 'bc7', 'png', 'none'])
     e.add_argument('--preview', default='none', choices=['png', 'jpg', 'none'])
     e.add_argument('--ring', default='dds', choices=['dds', 'bc3', 'bc7', 'png', 'none'])
+    e.add_argument('--atmo', default='cfg', choices=['cfg', 'none'])
     e.add_argument('--size', type=int, default=0); e.add_argument('--no-flip', action='store_true')
     a = ap.parse_args()
     r = {'make': cmd_make, 'install': cmd_install, 'sample': cmd_sample, 'new': cmd_new, 'flow': cmd_flow, 'export': cmd_export}[a.cmd](a)

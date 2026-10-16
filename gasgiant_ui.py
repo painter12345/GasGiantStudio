@@ -1,4 +1,4 @@
-import os, sys, json, copy, queue, random, threading, subprocess, time, colorsys
+import os, sys, json, copy, queue, random, threading, subprocess, time, colorsys, shutil
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import numpy as np
@@ -1229,7 +1229,7 @@ class SampleWin(tk.Toplevel):
 
 
 class ExportDialog(tk.Toplevel):
-    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'), ('preview', 'Preview sheet'))
+    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'), ('atmo', 'Scatterer config'), ('preview', 'Preview sheet'))
     SIZES = ['Same as build', '16384 \u00d7 8192', '8192 \u00d7 4096', '4096 \u00d7 2048', '2048 \u00d7 1024', '1024 \u00d7 512']
 
     def __init__(self, app, builds):
@@ -1262,13 +1262,13 @@ class ExportDialog(tk.Toplevel):
         ttk.Label(f, text='File name', style='Dim.TLabel').grid(row=3, column=1, sticky='w', pady=(12, 2))
         ttk.Label(f, text='Format', style='Dim.TLabel').grid(row=3, column=2, sticky='w', pady=(12, 2))
         self.rows = {}
-        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'ring': True, 'preview': False}
+        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'ring': True, 'atmo': True, 'preview': False}
         for i, (k, lab) in enumerate(self.KINDS):
             on = tk.BooleanVar(value=self.S.get('on_' + k, defaults[k]))
             chk = ttk.Checkbutton(f, text=lab, variable=on)
             chk.grid(row=4 + i, column=0, sticky='w', pady=3)
             fn = self.P['files'].get(k) or ''
-            base = os.path.splitext(os.path.basename(fn))[0] if fn else '%s_%s' % (self.name, k)
+            base = os.path.splitext(os.path.basename(fn))[0] if fn and k != 'atmo' else '%s_%s' % (self.name, k)
             v_name = tk.StringVar(value=base)
             ttk.Entry(f, textvariable=v_name, width=30).grid(row=4 + i, column=1, sticky='w', pady=3)
             v_fmt = tk.StringVar(value=self.S.get('fmt_' + k) if self.S.get('fmt_' + k) in gg.EXPORT_FORMATS[k] else gg.EXPORT_FORMATS[k][0])
@@ -1318,6 +1318,7 @@ class ExportDialog(tk.Toplevel):
                'flow': os.path.isfile(os.path.join(src, self.name + '_flow.truecolor')),
                'emissive': os.path.isfile(os.path.join(src, self.name + '_emissive.png')),
                'ring': os.path.isfile(os.path.join(src, self.name + '_ring.png')),
+               'atmo': gg.has_atmo(self.P),
                'preview': os.path.isfile(os.path.join(src, self.name + '_preview.png'))}
         for k, (on, chk, v_name, v_fmt, note) in self.rows.items():
             if has[k]:
@@ -1326,7 +1327,7 @@ class ExportDialog(tk.Toplevel):
             else:
                 on.set(False)
                 chk.state(['disabled'])
-                note.configure(text='not in this build')
+                note.configure(text='no atmosphere' if k == 'atmo' else 'not in this build')
         st = self.app.is_stale(self.res())
         self.stat.configure(text='Note: the settings changed after this build \u2013 the export shows the build, not the new settings.' if st else '')
 
@@ -1351,7 +1352,10 @@ class ExportDialog(tk.Toplevel):
         if not jobs:
             messagebox.showinfo('Nothing to export', 'Tick at least one file.', parent=self)
             return
-        exist = [gg.export_target(folder, b, fm) for _, b, fm in jobs if os.path.exists(gg.export_target(folder, b, fm))]
+        targets = [gg.export_target(folder, b, fm) for _, b, fm in jobs]
+        if any(k == 'atmo' for k, _, _ in jobs):
+            targets.append(gg.planets_file(folder, self.name))
+        exist = [t for t in targets if os.path.exists(t)]
         if exist and not messagebox.askyesno('Replace files?', 'These files already exist and will be replaced:\n\n' + '\n'.join(os.path.basename(x) for x in exist), parent=self):
             return
         sz = self.v_size.get()
@@ -1918,6 +1922,17 @@ class App(tk.Tk):
         self.cdrag = None
         self.bdrag = None
         self.view_geom = None
+        self.atmo_lock = threading.Lock()
+        self.atmo_q = queue.Queue()
+        self.atmo_gen = 0
+        self.atmo_req = None
+        self.atmo_thread = None
+        self.atmo_img = None
+        self.atmo_key = None
+        self.atmo_want = None
+        self.atmo_err = None
+        self.atmo_texc = {}
+        self.adrag = None
         self.build_ui()
         self.after(150, self.live_poll)
         self.bind('<Control-z>', self.undo)
@@ -1977,18 +1992,17 @@ class App(tk.Tk):
         self.tab_storms()
         self.tab_poles()
         self.tab_rings()
+        self.tab_atmo()
         self.tab_body()
         vb = ttk.Frame(right)
         vb.pack(fill='x')
-        for val, txt in (('bands', 'Live preview'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
+        for val, txt in (('bands', 'Live preview'), ('atmo', 'In game'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
             ttk.Radiobutton(vb, text=txt, value=val, variable=self.view, style='Toolbutton',
                             command=self.update_view).pack(side='left', padx=(0, 4))
         ttk.Checkbutton(vb, text='Swirls', variable=self.live_on, command=self.toggle_live).pack(side='left', padx=(10, 4))
         lcb = ttk.Combobox(vb, textvariable=self.live_size, values=LIVE_RES, width=5, state='readonly')
         lcb.pack(side='left', padx=(0, 8))
         lcb.bind('<<ComboboxSelected>>', self.live_size_changed)
-        self.live_lab = ttk.Label(vb, text='', style='Dim.TLabel')
-        self.live_lab.pack(side='left')
         self.export_btn = ttk.Button(vb, text='Export…', command=self.export)
         self.export_btn.pack(side='right')
         tb = ttk.Frame(right)
@@ -1997,6 +2011,8 @@ class App(tk.Tk):
         for val, txt in (('turn', 'Turn globe'), ('storms', 'Place storms'), ('chain', 'Storm chain'), ('bands', 'Move bands')):
             ttk.Radiobutton(tb, text=txt, value=val, variable=self.map_tool, style='Toolbutton',
                             command=self.tool_changed).pack(side='left', padx=(0, 4))
+        self.live_lab = ttk.Label(tb, text='', style='Dim.TLabel')
+        self.live_lab.pack(side='right')
         self.canvas = tk.Canvas(right, bg='#0d0f14', highlightthickness=1, highlightbackground=LINE)
         self.canvas.pack(fill='both', expand=True, pady=(8, 8))
         self.canvas.bind('<Configure>', lambda e: self.schedule_redraw())
@@ -2752,6 +2768,668 @@ class App(tk.Tk):
         self.changed()
         self.ring_schedule(10)
 
+    ATMO_TIPS = {'HR': 'HR \u2013 how fast the air thins out with height (km)',
+                 'HM': 'HM \u2013 how fast the haze thins out with height (km)',
+                 'm_mieG': 'm_mieG \u2013 how strongly the haze glows when you look towards the sun',
+                 'atmosphereStartRadiusScale': 'atmosphereStartRadiusScale \u2013 below 1 the air starts under the cloud tops',
+                 'averageGroundReflectance': 'averageGroundReflectance \u2013 light bounced back up from the planet',
+                 'godrayStrength': 'godrayStrength \u2013 only in game, not in this preview'}
+
+    def tab_atmo(self):
+        sf = ScrollFrame(self.nb)
+        self.nb.add(sf, text='Atmosphere')
+        self.atmo_tab = sf
+        p = sf.inner
+        A = ('atmosphere',)
+        top = ttk.Frame(p)
+        top.pack(fill='x', pady=(2, 0))
+        self.atmo_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='Scatterer atmosphere', variable=self.atmo_on, command=self.atmo_toggle).pack(side='left')
+        ttk.Button(top, text='Load from Scatterer config\u2026', command=self.atmo_load).pack(side='right')
+        ttk.Label(p, text='The values are the ones in Scatterer\u2019s atmo.cfg. The \u201cIn game\u201d view on the right shows the '
+                          'planet with this atmosphere the way KSP\u2019s map view shows it.',
+                  style='Dim.TLabel', wraplength=520, justify='left').pack(anchor='w', pady=(4, 0))
+        vr = ttk.Frame(p)
+        vr.pack(fill='x', pady=(8, 0))
+        ttk.Label(vr, text='Show').pack(side='left', padx=(8, 8))
+        self.atmo_view = tk.StringVar(value='planet')
+        for val, txt in (('planet', 'Whole planet'), ('limb', 'Day-side edge'), ('sunset', 'Sunset edge')):
+            ttk.Radiobutton(vr, text=txt, value=val, variable=self.atmo_view, style='Toolbutton',
+                            command=self.atmo_view_changed).pack(side='left', padx=(0, 4))
+        ttk.Button(vr, text='In game view', command=self.atmo_show).pack(side='right')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Sun angle (\u00b0)', A + ('sun_angle',), 0, 170, 1,
+               tip='only for the picture: 0 = sun behind you, 90 = from the side, 150 = from behind the planet')
+        pr = ttk.Frame(p)
+        pr.pack(fill='x', pady=(8, 0))
+        ttk.Label(pr, text='Start from').pack(side='left', padx=(8, 8))
+        self.atmo_preset = tk.StringVar(value='The planet\u2019s colours')
+        ttk.Combobox(pr, textvariable=self.atmo_preset, values=['The planet\u2019s colours'] + list(gg.ATMO_PRESETS),
+                     width=22, state='readonly').pack(side='left')
+        ttk.Button(pr, text='Apply', command=self.atmo_apply_preset).pack(side='left', padx=6)
+        self.section(p, 'Planet')
+        rr = ttk.Frame(p)
+        rr.pack(fill='x')
+        ttk.Label(rr, text='Radius (km)').pack(side='left', padx=(8, 8))
+        self.v_atmo_radius = tk.StringVar()
+        en = ttk.Entry(rr, textvariable=self.v_atmo_radius, width=10)
+        en.pack(side='left')
+        en.bind('<Return>', self.atmo_commit_entries)
+        en.bind('<FocusOut>', self.atmo_commit_entries)
+        ttk.Button(rr, text='Read from Kopernicus config', command=self.atmo_find_radius).pack(side='left', padx=6)
+        ttk.Label(p, text='Scatterer takes the radius from the planet itself; it only matters here for the picture.',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w', pady=(2, 0))
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Air starts at (\u00d7 radius)', A + ('atmosphereStartRadiusScale',), 0.95, 1.05, 0.001,
+               tip=self.ATMO_TIPS['atmosphereStartRadiusScale'])
+        self.section(p, 'Rayleigh scattering \u2013 the colour of the sky')
+        ttk.Label(p, text='m_betaR: how strongly the air scatters red, green and blue. Bigger = thicker, brighter air.',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Scale height (km)', A + ('HR',), 0.5, 150, 0.1, tip=self.ATMO_TIPS['HR'])
+        for i, c in enumerate(('Red', 'Green', 'Blue')):
+            Slider(self, g, 2 + i, c, A + ('m_betaR', i), 0, 0.06, 0.00001, notify=self.atmo_colours_changed)
+        cr = ttk.Frame(p)
+        cr.pack(fill='x', pady=(6, 0))
+        self.atmo_sky_sw = tk.Label(cr, width=6, relief='solid', bd=1, cursor='hand2')
+        self.atmo_sky_sw.pack(side='left', padx=(8, 6))
+        self.atmo_sky_sw.bind('<Button-1>', lambda e: self.atmo_pick_colour('m_betaR'))
+        ttk.Button(cr, text='Sky colour\u2026', command=lambda: self.atmo_pick_colour('m_betaR')).pack(side='left')
+        ttk.Button(cr, text='Match the planet', command=self.atmo_match).pack(side='left', padx=6)
+        self.section(p, 'Mie scattering \u2013 haze')
+        ttk.Label(p, text='BETA_MSca: how much haze there is, for red, green and blue.', style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Scale height (km)', A + ('HM',), 0.1, 60, 0.01, tip=self.ATMO_TIPS['HM'])
+        for i, c in enumerate(('Red', 'Green', 'Blue')):
+            Slider(self, g, 2 + i, c, A + ('BETA_MSca', i), 0, 0.06, 0.00001, notify=self.atmo_colours_changed)
+        Slider(self, g, 5, 'Glow towards the sun', A + ('m_mieG',), 0, 0.99, 0.01, tip=self.ATMO_TIPS['m_mieG'])
+        cr = ttk.Frame(p)
+        cr.pack(fill='x', pady=(6, 0))
+        self.atmo_haze_sw = tk.Label(cr, width=6, relief='solid', bd=1, cursor='hand2')
+        self.atmo_haze_sw.pack(side='left', padx=(8, 6))
+        self.atmo_haze_sw.bind('<Button-1>', lambda e: self.atmo_pick_colour('BETA_MSca'))
+        ttk.Button(cr, text='Haze colour\u2026', command=lambda: self.atmo_pick_colour('BETA_MSca')).pack(side='left')
+        ttk.Button(cr, text='Grey haze', command=self.atmo_grey_haze).pack(side='left', padx=6)
+        self.section(p, 'Absorbing layer (ozone)')
+        self.atmo_oz = tk.BooleanVar(value=False)
+        ttk.Checkbutton(p, text='useOzone \u2013 a layer that swallows some colours (ozone, methane\u2026)', variable=self.atmo_oz,
+                        command=lambda: self.atmo_flag('useOzone', self.atmo_oz)).pack(anchor='w', padx=(8, 0))
+        g = self.grid_box(p)
+        for i, c in enumerate(('Red', 'Green', 'Blue')):
+            Slider(self, g, i, 'Absorbs ' + c.lower(), A + ('ozoneAbsorption', i), 0, 0.005, 0.000001)
+        Slider(self, g, 3, 'Height (km)', A + ('ozoneHeight',), 0, 300, 0.5, tip='ozoneHeight \u2013 the middle of the layer')
+        Slider(self, g, 5, 'Half thickness (km)', A + ('ozoneFalloff',), 0.5, 200, 0.5, tip='ozoneFalloff')
+        self.section(p, 'Light')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Light from below', A + ('averageGroundReflectance',), 0, 1, 0.01, tip=self.ATMO_TIPS['averageGroundReflectance'])
+        Slider(self, g, 2, 'Godrays', A + ('godrayStrength',), 0, 1, 0.05, tip=self.ATMO_TIPS['godrayStrength'])
+        self.atmo_ms = tk.BooleanVar(value=True)
+        ttk.Checkbutton(p, text='multipleScattering \u2013 light that bounces around more than once (softer, brighter)',
+                        variable=self.atmo_ms, command=lambda: self.atmo_flag('multipleScattering', self.atmo_ms)).pack(anchor='w', padx=(8, 0), pady=(4, 0))
+        self.section(p, 'Seen from orbit (the last config point)')
+        g = self.grid_box(p)
+        L = A + ('configPoints', -1)
+        for i, (k, lab, lo, hi, st, tip) in enumerate((
+                ('skyExposure', 'Sky brightness', 0.005, 1.0, 0.005, 'skyExposure \u2013 the glow around the planet'),
+                ('scatteringExposure', 'Haze over the planet', 0.005, 1.0, 0.005, 'scatteringExposure \u2013 the light the air adds over the planet'),
+                ('extinctionThickness', 'Shade from the air', 0, 1.5, 0.01, 'extinctionThickness \u2013 how much the air darkens the planet below'),
+                ('extinctionTint', 'Coloured shade', 0, 1, 0.01, 'extinctionTint \u2013 0 = grey, 1 = in the colours of the air'),
+                ('skyAlpha', 'Sky opacity', 0, 1, 0.01, 'skyAlpha'),
+                ('skyExtinctionTint', 'Sky shade colour', 0, 1, 0.01, 'skyExtinctionTint \u2013 tints the stars behind the air; not in the picture'))):
+            Slider(self, g, i * 2, lab, L + (k,), lo, hi, st, tip=tip, notify=self.atmo_point_changed)
+        self.section(p, 'Config points')
+        ttk.Label(p, text='Scatterer blends between these by the camera\u2019s height above the planet (in metres). Below the first '
+                          'point it uses the first, above the last the last; the map view always uses the last one.',
+                  style='Dim.TLabel', wraplength=520, justify='left').pack(anchor='w')
+        pts = ListEditor(self, p, lambda: self.P['atmosphere']['configPoints'],
+                         [num('altitude', 'altitude', -1e6, 1e9, 1000, '%.0f', width=10),
+                          num('skyExposure', 'skyExposure', 0, 5, 0.01, '%.3f'),
+                          num('scatteringExposure', 'scatteringExposure', 0, 5, 0.01, '%.3f'),
+                          num('skyAlpha', 'skyAlpha', 0, 1, 0.05, '%.2f'),
+                          num('skyExtinctionTint', 'skyExtinctionTint', 0, 1, 0.05, '%.2f'),
+                          num('extinctionThickness', 'extinctionThickness', 0, 2, 0.05, '%.2f'),
+                          num('extinctionTint', 'extinctionTint', 0, 1, 0.05, '%.2f'),
+                          num('postProcessAlpha', 'postProcessAlpha', 0, 1, 0.05, '%.2f'),
+                          num('postProcessDepth', 'postProcessDepth', 0, 5, 0.05, '%.2f')],
+                         self.atmo_new_point, card=True, cols=4, add_text='Add config point', notify=self.atmo_points_changed,
+                         registry=[])
+        pts.frame.pack(fill='x', pady=6)
+        self.atmo_pts = pts
+        self.section(p, 'Sun and planet list')
+        g = ttk.Frame(p)
+        g.pack(fill='x')
+        self.v_atmo_sun = tk.StringVar()
+        self.v_atmo_casters = tk.StringVar()
+        ttk.Label(g, text='Sun (mainSunCelestialBody)').grid(row=0, column=0, sticky='w', padx=8, pady=4)
+        e1 = ttk.Entry(g, textvariable=self.v_atmo_sun, width=20)
+        e1.grid(row=0, column=1, sticky='w', pady=4)
+        ttk.Label(g, text='Sun colour').grid(row=1, column=0, sticky='w', padx=8, pady=4)
+        self.atmo_sun_sw = Swatch(self, g, A + ('sun_color',))
+        self.atmo_sun_sw.lab.grid(row=1, column=1, sticky='w', pady=4)
+        ttk.Label(g, text='Eclipse casters (moons)').grid(row=2, column=0, sticky='w', padx=8, pady=4)
+        e2 = ttk.Entry(g, textvariable=self.v_atmo_casters, width=30)
+        e2.grid(row=2, column=1, sticky='w', pady=4)
+        for w in (e1, e2):
+            w.bind('<Return>', self.atmo_commit_entries)
+            w.bind('<FocusOut>', self.atmo_commit_entries)
+        self.atmo_cloud = tk.BooleanVar(value=True)
+        self.atmo_flat = tk.BooleanVar(value=True)
+        ttk.Checkbutton(g, text='usesCloudIntegration (EVE clouds get lit by the atmosphere)', variable=self.atmo_cloud,
+                        command=lambda: self.atmo_flag('cloud_integration', self.atmo_cloud)).grid(row=3, column=0, columnspan=2, sticky='w', padx=8, pady=2)
+        ttk.Checkbutton(g, text='flatScaledSpaceModel', variable=self.atmo_flat,
+                        command=lambda: self.atmo_flag('flat_model', self.atmo_flat)).grid(row=4, column=0, columnspan=2, sticky='w', padx=8, pady=2)
+        self.section(p, 'Other Scatterer values')
+        ttk.Label(p, text='These go into atmo.cfg as they are (rim, shine, cloud and scaled-texture settings). '
+                          'One \u201ckey = value\u201d per line.', style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        self.atmo_extra = tk.Text(p, height=10, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
+        self.atmo_extra.pack(anchor='w', pady=(4, 0))
+        self.atmo_extra.bind('<FocusOut>', self.atmo_commit_extra)
+        self.section(p, 'Scatterer config')
+        ttk.Label(p, text='atmo.cfg \u2013 goes into GameData/<your mod>/Scatterer/Planets/<planet>/ (any .cfg name works):',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w')
+        self.atmo_cfg = tk.Text(p, height=14, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
+        self.atmo_cfg.pack(anchor='w', pady=(4, 0))
+        br = ttk.Frame(p)
+        br.pack(fill='x', pady=(6, 0))
+        ttk.Button(br, text='Copy', command=lambda: self.atmo_copy('atmo')).pack(side='left')
+        ttk.Button(br, text='Save atmo.cfg\u2026', command=self.atmo_save).pack(side='left', padx=6)
+        ttk.Label(p, text='Planet list entry \u2013 Scatterer only draws planets that are in its list:',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w', pady=(10, 0))
+        self.atmo_pl = tk.Text(p, height=12, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
+        self.atmo_pl.pack(anchor='w', pady=(4, 0))
+        ttk.Button(p, text='Copy', command=lambda: self.atmo_copy('list')).pack(anchor='w', pady=(6, 12))
+        self.swatches.append(type('A', (), {'refresh': lambda s=None: self.atmo_refresh()})())
+
+    def atmo_e(self):
+        return self.P['atmosphere']
+
+    def atmo_refresh(self):
+        e = self.atmo_e()
+        self.atmo_on.set(bool(e.get('enabled')))
+        self.atmo_view.set(e.get('view', 'planet'))
+        self.atmo_oz.set(bool(e.get('useOzone')))
+        self.atmo_ms.set(bool(e.get('multipleScattering')))
+        self.atmo_cloud.set(bool(e.get('cloud_integration')))
+        self.atmo_flat.set(bool(e.get('flat_model')))
+        self.v_atmo_radius.set(gg.cfg_num(e.get('radius', 6000)))
+        self.v_atmo_sun.set(e.get('sun', 'Sun'))
+        self.v_atmo_casters.set(e.get('eclipse_casters', ''))
+        self.atmo_pts.rebuild()
+        self.atmo_extra.delete('1.0', 'end')
+        self.atmo_extra.insert('1.0', '\n'.join('%s = %s' % (k, v) for k, v in e.get('extra') or []))
+        self.atmo_swatches()
+        self.atmo_text()
+
+    def atmo_swatches(self):
+        e = self.atmo_e()
+        self.atmo_sky_sw.configure(bg=hexcol(gg.colour_from_beta(e['m_betaR'])))
+        self.atmo_haze_sw.configure(bg=hexcol(gg.colour_from_beta(e['BETA_MSca'])))
+
+    def atmo_text(self):
+        for box, txt in ((self.atmo_cfg, gg.atmo_cfg(self.P)), (self.atmo_pl, gg.atmo_planets(self.P))):
+            box.configure(state='normal')
+            box.delete('1.0', 'end')
+            box.insert('1.0', txt)
+            box.configure(state='disabled')
+
+    def atmo_copy(self, which):
+        self.clipboard_clear()
+        self.clipboard_append(gg.atmo_cfg(self.P) if which == 'atmo' else gg.atmo_planets(self.P))
+        self.status('Scatterer config copied' if which == 'atmo' else 'Planet list entry copied')
+
+    def atmo_dirty(self):
+        if getattr(self, 'atmo_text_after', None):
+            self.after_cancel(self.atmo_text_after)
+        self.atmo_text_after = self.after(250, self.atmo_text)
+
+    def atmo_colours_changed(self):
+        self.atmo_swatches()
+        self.changed()
+
+    def atmo_point_changed(self):
+        if getattr(self, 'atmo_pts_after', None):
+            self.after_cancel(self.atmo_pts_after)
+        self.atmo_pts_after = self.after(400, self.atmo_pts.rebuild)
+        self.changed()
+
+    def atmo_points_changed(self):
+        pts = self.atmo_e()['configPoints']
+        if not pts:
+            pts.append(dict(gg.ATMO_POINT))
+        order = sorted(pts, key=lambda q: float(q.get('altitude', 0)))
+        if order != pts:
+            pts[:] = order
+            self.after_idle(self.atmo_pts.rebuild)
+        for sl in self.sliders:
+            if sl.path[:2] == ('atmosphere', 'configPoints'):
+                sl.refresh()
+        self.changed()
+
+    def atmo_new_point(self):
+        pts = self.atmo_e()['configPoints']
+        q = dict(pts[-1] if pts else gg.ATMO_POINT)
+        q['altitude'] = float(q.get('altitude', 0)) + 50000.0
+        return q
+
+    def atmo_flag(self, key, var):
+        self.snapshot()
+        self.atmo_e()[key] = bool(var.get())
+        self.changed()
+
+    def atmo_commit_entries(self, _e=None):
+        e = self.atmo_e()
+        new = {}
+        try:
+            r = float(self.v_atmo_radius.get().replace(',', '.'))
+            if r > 0:
+                new['radius'] = r
+        except ValueError:
+            pass
+        new['sun'] = self.v_atmo_sun.get().strip() or 'Sun'
+        new['eclipse_casters'] = ', '.join(gg.atmo_casters({'eclipse_casters': self.v_atmo_casters.get()}))
+        if any(e.get(k) != v for k, v in new.items()):
+            self.snapshot()
+            e.update(new)
+            self.changed()
+        self.v_atmo_radius.set(gg.cfg_num(e['radius']))
+        self.v_atmo_casters.set(e['eclipse_casters'])
+
+    def atmo_commit_extra(self, _e=None):
+        out = []
+        for line in self.atmo_extra.get('1.0', 'end').splitlines():
+            line = line.split('//', 1)[0].strip()
+            if '=' in line:
+                k, v = line.split('=', 1)
+                k, v = k.strip(), v.strip()
+                if k and k not in gg.ATMO_VALUES and k not in ('name', 'configPoints'):
+                    out.append([k, v])
+        if out != self.atmo_e().get('extra'):
+            self.snapshot()
+            self.atmo_e()['extra'] = out
+            self.changed()
+
+    def atmo_pick_colour(self, key):
+        e = self.atmo_e()
+        old = list(e[key])
+
+        def live(v):
+            e[key] = gg.beta_from_colour(v, old)
+            self.atmo_swatches()
+            for sl in self.sliders:
+                if sl.path[:2] == ('atmosphere', key):
+                    sl.refresh()
+            self.changed()
+
+        def restore():
+            e[key] = old
+            self.atmo_swatches()
+            for sl in self.sliders:
+                if sl.path[:2] == ('atmosphere', key):
+                    sl.refresh()
+            self.changed()
+        self.snapshot()
+        c = pick_colour(self, gg.colour_from_beta(old), title='Sky colour' if key == 'm_betaR' else 'Haze colour', live=live, restore=restore)
+        if c:
+            live(c)
+        else:
+            self.drop_snapshot()
+
+    def atmo_match(self):
+        self.snapshot()
+        e = self.atmo_e()
+        e['m_betaR'] = gg.beta_from_colour(gg.planet_tint(self.P), e['m_betaR'])
+        self.refresh_atmo_sliders()
+        self.changed()
+        self.status('Sky colour now matches the planet\u2019s bands')
+
+    def atmo_grey_haze(self):
+        self.snapshot()
+        e = self.atmo_e()
+        m = float(np.mean(e['BETA_MSca']))
+        e['BETA_MSca'] = [m, m, m]
+        self.refresh_atmo_sliders()
+        self.changed()
+
+    def refresh_atmo_sliders(self):
+        for sl in self.sliders:
+            if sl.path[0] == 'atmosphere':
+                sl.refresh()
+        self.atmo_swatches()
+
+    def atmo_apply_preset(self):
+        self.snapshot()
+        e = self.atmo_e()
+        name = self.atmo_preset.get()
+        if name in gg.ATMO_PRESETS:
+            for k, v in gg.ATMO_PRESETS[name].items():
+                e[k] = copy.deepcopy(v)
+        else:
+            for k in ('atmosphereStartRadiusScale', 'HR', 'HM', 'BETA_MSca', 'm_mieG', 'useOzone', 'configPoints'):
+                e[k] = copy.deepcopy(gg.ATMO_PRESETS['Jool (stock)'][k])
+            e['m_betaR'] = gg.beta_from_colour(gg.planet_tint(self.P), gg.ATMO_PRESETS['Jool (stock)']['m_betaR'])
+        self.P['atmosphere'] = gg.atmo_entry(e)
+        self.atmo_refresh()
+        self.refresh_atmo_sliders()
+        self.changed()
+        self.status('Atmosphere values from \u201c%s\u201d \u2013 Undo goes back' % name)
+
+    def atmo_fresh(self):
+        e = dict(self.atmo_e())
+        d = gg.atmo_entry({})
+        return all(e.get(k) == d[k] for k in gg.ATMO_VALUES + ('configPoints', 'extra'))
+
+    def atmo_toggle(self):
+        self.snapshot()
+        e = self.atmo_e()
+        e['enabled'] = bool(self.atmo_on.get())
+        if e['enabled'] and self.atmo_fresh():
+            found = gg.find_atmo_cfg(self.P['name']) if gg.game_mod_dir() else ''
+            if found and messagebox.askyesno('Scatterer config found',
+                                             'Your mod already has a Scatterer config for %s:\n\n%s\n\nStart from its values?'
+                                             % (self.P['name'], gg.nice(found)), parent=self):
+                self.atmo_read_file(found)
+            else:
+                e['m_betaR'] = gg.beta_from_colour(gg.planet_tint(self.P), e['m_betaR'])
+            r, _ = gg.find_body_radius(self.P['name']) if gg.game_mod_dir() else (None, '')
+            if r:
+                self.atmo_e()['radius'] = r
+            self.atmo_refresh()
+            self.refresh_atmo_sliders()
+        self.changed()
+        if e['enabled'] and self.view.get() != 'atmo':
+            self.atmo_show()
+
+    def atmo_show(self):
+        if self.map_tool.get() != 'turn':
+            self.map_tool.set('turn')
+            self.tool_changed()
+        self.view.set('atmo')
+        self.update_view()
+
+    def atmo_view_changed(self):
+        self.atmo_e()['view'] = self.atmo_view.get()
+        self.changed()
+        if self.view.get() != 'atmo':
+            self.atmo_show()
+
+    def atmo_read_file(self, path):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                txt = f.read()
+        except OSError as ex:
+            messagebox.showerror('Could not read', str(ex), parent=self)
+            return False
+        e, nm = gg.atmo_from_cfg(txt, self.P['name'])
+        if e is None:
+            messagebox.showerror('No atmosphere', 'There is no Scatterer Atmo node in\n%s' % path, parent=self)
+            return False
+        old = self.atmo_e()
+        for k in ('enabled', 'radius', 'sun', 'sun_color', 'eclipse_casters', 'cloud_integration', 'flat_model', 'sun_angle', 'view'):
+            e[k] = old.get(k, e[k])
+        e['enabled'] = True
+        d = os.path.dirname(path)
+        root = d
+        for _ in range(4):
+            if os.path.basename(root).lower() == 'scatterer':
+                break
+            root = os.path.dirname(root)
+        else:
+            root = d
+        item, _ = gg.find_planets_item(nm or self.P['name'], root)
+        if item:
+            e.update(item)
+        self.P['atmosphere'] = gg.atmo_entry(e)
+        self.status('Loaded the atmosphere of %s from %s' % (nm or '?', os.path.basename(path)))
+        return True
+
+    def atmo_load(self):
+        found = gg.find_atmo_cfg(self.P['name']) if gg.game_mod_dir() else ''
+        sd = gg.scatterer_dir(gg.game_mod_dir())
+        init = os.path.dirname(found) if found else (sd or gg.TOOL)
+        path = filedialog.askopenfilename(parent=self, title='Scatterer atmosphere config', initialdir=init,
+                                          initialfile=os.path.basename(found) if found else '',
+                                          filetypes=[('Config', '*.cfg'), ('All files', '*.*')])
+        if not path:
+            return
+        self.snapshot()
+        if not self.atmo_read_file(path):
+            self.drop_snapshot()
+            return
+        self.atmo_refresh()
+        self.refresh_atmo_sliders()
+        self.changed()
+        if self.view.get() != 'atmo':
+            self.atmo_show()
+
+    def atmo_find_radius(self):
+        self.status('Looking for %s in the Kopernicus configs\u2026' % self.P['name'])
+        self.update_idletasks()
+        r, src = gg.find_body_radius(self.P['name']) if gg.game_mod_dir() else (None, '')
+        if not r:
+            path = filedialog.askopenfilename(parent=self, title='Kopernicus config of %s' % self.P['name'],
+                                              filetypes=[('Config', '*.cfg'), ('All files', '*.*')])
+            if not path:
+                self.status('Radius not found')
+                return
+            r, src = gg.find_body_radius(self.P['name'], os.path.dirname(path))
+            if not r:
+                messagebox.showinfo('Radius', 'No Body called %s with a radius in that folder.' % self.P['name'], parent=self)
+                return
+        self.snapshot()
+        self.atmo_e()['radius'] = r
+        self.v_atmo_radius.set(gg.cfg_num(r))
+        self.changed()
+        self.status('Radius %s km from %s' % (gg.cfg_num(r), os.path.basename(src)))
+
+    def atmo_save(self):
+        self.atmo_commit_entries()
+        self.atmo_commit_extra()
+        name = self.P['name']
+        mod = gg.game_mod_dir()
+        found = gg.find_atmo_cfg(name) if mod else ''
+        sd = gg.scatterer_dir(mod)
+        init = os.path.dirname(found) if found else (os.path.join(sd, 'Planets', name) if sd else os.path.join(gg.TOOL, 'export'))
+        idir = init
+        while idir and not os.path.isdir(idir):
+            idir = os.path.dirname(idir)
+        path = filedialog.asksaveasfilename(parent=self, title='Save Scatterer atmosphere', initialdir=idir or gg.TOOL,
+                                            initialfile='atmo.cfg', defaultextension='.cfg',
+                                            filetypes=[('Config', '*.cfg'), ('All files', '*.*')])
+        if not path:
+            return
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            backed = self.atmo_backup(path, stamp)
+            with open(path, 'w', newline='\n') as f:
+                f.write(gg.atmo_cfg(self.P))
+        except OSError as ex:
+            messagebox.showerror('Could not save', str(ex), parent=self)
+            return
+        msg = 'Saved %s' % path + (' (old file backed up)' if backed else '')
+        root = os.path.dirname(path)
+        r2 = root
+        for _ in range(4):
+            if os.path.basename(r2).lower() == 'scatterer':
+                root = r2
+                break
+            r2 = os.path.dirname(r2)
+        item, where = gg.find_planets_item(name, root)
+        if item:
+            msg += ' \u2013 %s is already in the planet list (%s)' % (name, os.path.basename(where))
+        else:
+            pl = gg.planets_file(root, name)
+            if messagebox.askyesno('Planet list', 'Scatterer only draws planets that are in its planet list, and %s isn\u2019t '
+                                   'in one in this folder yet.\n\nSave %s next to it?' % (name, gg.nice(pl)), parent=self):
+                try:
+                    self.atmo_backup(pl, stamp)
+                    with open(pl, 'w', newline='\n') as f:
+                        f.write(gg.atmo_planets(self.P))
+                    msg += ' and %s' % os.path.basename(pl)
+                except OSError as ex:
+                    messagebox.showerror('Could not save', str(ex), parent=self)
+        self.status(msg)
+        self.log(msg)
+
+    def atmo_backup(self, path, stamp):
+        if not os.path.isfile(path):
+            return False
+        b = gg.backup_dir(self.P['name'], stamp)
+        os.makedirs(b, exist_ok=True)
+        shutil.copy2(path, os.path.join(b, os.path.basename(path)))
+        return True
+
+    def atmo_texture(self):
+        L = self.live_last if self.live_on.get() else None
+        st = self.is_stale()
+        f = os.path.join(self.out_path(), self.P['name'] + '_color.png')
+        if st is False and os.path.isfile(f):
+            key = ('build', f, os.path.getmtime(f))
+            if self.atmo_texc.get('key') != key:
+                try:
+                    c = Image.open(f).convert('RGB')
+                    if c.width > 2048:
+                        c = c.resize((2048, 1024), Image.LANCZOS)
+                    ef = os.path.join(self.out_path(), self.P['name'] + '_emissive.png')
+                    em = None
+                    if os.path.isfile(ef):
+                        em = Image.open(ef).convert('RGB').resize(c.size, Image.LANCZOS)
+                        em = np.asarray(em).astype(np.float32) / 255
+                    self.atmo_texc = {'key': key, 'tex': np.asarray(c).astype(np.float32) / 255, 'em': em}
+                except Exception:
+                    self.atmo_texc = {}
+            if self.atmo_texc.get('key') == key:
+                return self.atmo_texc['tex'], self.atmo_texc['em'], key
+        if L is not None:
+            key = ('live', L['key'], L['W'])
+            if self.atmo_texc.get('key') != key:
+                em = L['em'].astype(np.float32) / 255 if L['em'] is not None else None
+                self.atmo_texc = {'key': key, 'tex': L['col'].astype(np.float32) / 255, 'em': em}
+            return self.atmo_texc['tex'], self.atmo_texc['em'], key
+        lv = self.live_view
+        key = ('bands', self.live_key())
+        if lv is not None and self.atmo_texc.get('key') != key:
+            self.atmo_texc = {'key': key, 'tex': lv['tex'], 'em': lv['em']}
+        elif lv is None:
+            strip = band_image(self.P, 1024, 512)
+            self.atmo_texc = {'key': key, 'tex': np.asarray(strip).astype(np.float32) / 255, 'em': None}
+        return self.atmo_texc['tex'], self.atmo_texc['em'], key
+
+    def atmo_size(self):
+        cw, ch = max(10, self.canvas.winfo_width()), max(10, self.canvas.winfo_height())
+        w, h = max(200, cw - 16), max(150, ch - 16)
+        k = min(1.0, 1300.0 / w, 820.0 / h)
+        return int(w * k), int(h * k)
+
+    def atmo_request(self, quick_only=False):
+        if not gg.has_atmo(self.P):
+            return
+        tex, em, tkey = self.atmo_texture()
+        w, h = self.atmo_size()
+        P = gg.normalize(copy.deepcopy(self.P))
+        pv = P['preview']
+        key = json.dumps([P['atmosphere'], pv, self.rot, w, h, str(tkey)], sort_keys=True, default=str)
+        self.atmo_want = key
+        if self.atmo_key == key and not quick_only:
+            return
+        r = self.atmo_req
+        if r is not None and r[1] == key and r[-1] == quick_only:
+            return
+        self.atmo_err = None
+        with self.atmo_lock:
+            self.atmo_gen += 1
+            self.atmo_req = (self.atmo_gen, key, P, tex, em, w, h, tuple(self.rot), quick_only)
+            if self.atmo_thread is None:
+                self.atmo_thread = threading.Thread(target=self.atmo_worker, daemon=True)
+                self.atmo_thread.start()
+
+    def atmo_worker(self):
+        while True:
+            with self.atmo_lock:
+                req = self.atmo_req
+                if req is None:
+                    self.atmo_thread = None
+                    return
+            gen, key, P, tex, em, w, h, rot, quick_only = req
+
+            def cancel(gen=gen):
+                r = self.atmo_req
+                if r is None or r[0] != gen:
+                    raise gg.Cancelled()
+            try:
+                passes = ((3, 6),) if quick_only else ((3, 6), (1, 14))
+                for sc, steps in passes:
+                    t0 = time.time()
+                    im = gg.render_atmo(P, tex, em, w=max(60, w // sc), h=max(40, h // sc), steps=steps, rot=rot, cancel=cancel)
+                    if sc > 1:
+                        im = im.resize((w, h), Image.BILINEAR)
+                    self.atmo_q.put((gen, key, im, sc == 1, time.time() - t0, None))
+            except gg.Cancelled:
+                continue
+            except Exception as ex:
+                self.atmo_q.put((gen, key, None, True, 0, str(ex)))
+            with self.atmo_lock:
+                if self.atmo_req is not None and self.atmo_req[0] == gen:
+                    self.atmo_req = None
+
+    def atmo_poll(self):
+        got = False
+        try:
+            while True:
+                gen, key, im, final, dt, err = self.atmo_q.get_nowait()
+                if gen != self.atmo_gen:
+                    continue
+                if err:
+                    self.atmo_err = err
+                else:
+                    self.atmo_img = im
+                    self.atmo_err = None
+                    if final:
+                        self.atmo_key = key
+                got = True
+        except queue.Empty:
+            pass
+        if got and self.view.get() == 'atmo':
+            self.atmo_present()
+
+    def atmo_present(self):
+        if self.atmo_err:
+            self.view_src = None
+            self.status('Could not draw the atmosphere: %s' % self.atmo_err[:120])
+        else:
+            self.view_src = self.atmo_img
+        self.redraw()
+
+    def atmo_drag_start(self, e):
+        if self.view.get() != 'atmo' or not gg.has_atmo(self.P):
+            return False
+        self.snapshot()
+        self.adrag = (e.x, float(self.atmo_e()['sun_angle']), False)
+        return True
+
+    def atmo_drag_move(self, e):
+        x0, a0, _ = self.adrag
+        a = round(max(0.0, min(170.0, a0 + (e.x - x0) * 0.4)))
+        if a != self.atmo_e()['sun_angle']:
+            self.atmo_e()['sun_angle'] = a
+            self.adrag = (x0, a0, True)
+            self.atmo_request(quick_only=True)
+            self.status('Sun angle %d\u00b0' % a)
+
+    def atmo_drag_end(self):
+        moved = self.adrag[2]
+        self.adrag = None
+        if moved:
+            for sl in self.sliders:
+                if sl.path == ('atmosphere', 'sun_angle'):
+                    sl.refresh()
+            self.changed()
+        else:
+            self.drop_snapshot()
+
+    def live_key(self):
+        return json.dumps({k: v for k, v in self.P.items() if k not in ('atmosphere', 'rings')}, sort_keys=True, default=str)
+
     def new_big_storm(self):
         s = gg.big_storm({})
         s['core_color'] = list(self.P['storms']['core_color'])
@@ -2808,7 +3486,9 @@ class App(tk.Tk):
         self.update_res_info()
         if hasattr(self, 'ring_cv'):
             self.ring_schedule()
-        if self.view.get() == 'bands':
+        if hasattr(self, 'atmo_cfg'):
+            self.atmo_dirty()
+        if self.view.get() in ('bands', 'atmo'):
             if self.pending:
                 self.after_cancel(self.pending)
             self.pending = self.after(180, self.update_view)
@@ -2932,6 +3612,9 @@ class App(tk.Tk):
         self.history = []
         self.stop_live()
         self.live_last = None
+        self.atmo_img = None
+        self.atmo_key = None
+        self.atmo_texc = {}
         self.undo_btn.configure(state='disabled')
         self.refresh_all()
 
@@ -3015,7 +3698,9 @@ class App(tk.Tk):
                 built = gg.normalize(gg.merge(gg.DEFAULTS, json.load(fh)))
         except Exception:
             return None
-        return json.dumps(built, sort_keys=True) != json.dumps(self.P, sort_keys=True)
+        a = {k: v for k, v in built.items() if k != 'atmosphere'}
+        b = {k: v for k, v in self.P.items() if k != 'atmosphere'}
+        return json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True)
 
     def update_stale(self):
         if self.proc:
@@ -3027,8 +3712,24 @@ class App(tk.Tk):
     def update_view(self, from_live=False):
         self.pending = None
         v = self.view.get()
+        if v == 'atmo':
+            skey = self.live_key()
+            if not from_live:
+                self.request_live(skey)
+            self.update_live_label(skey)
+            if not gg.has_atmo(self.P):
+                self.view_src = None
+                self.status('No atmosphere yet – tick “Scatterer atmosphere” in the Atmosphere tab')
+            else:
+                self.atmo_request()
+                self.view_src = self.atmo_img
+                if not self.proc:
+                    self.status('In game: the Scatterer atmosphere as in the map view · drag left or right to move the sun')
+            self.update_export_state()
+            self.redraw()
+            return
         if v == 'bands':
-            skey = json.dumps(self.P, sort_keys=True, default=str)
+            skey = self.live_key()
             live = self.live_last if self.live_on.get() else None
             heat = gg.has_heat(self.P)
             try:
@@ -3295,6 +3996,9 @@ class App(tk.Tk):
         self.sdrag = None
         self.cdrag = None
         self.bdrag = None
+        self.adrag = None
+        if self.atmo_drag_start(e):
+            return
         if self.view.get() != 'bands' or self.live_view is None:
             return
         p = self.sheet_xy(e)
@@ -3351,6 +4055,9 @@ class App(tk.Tk):
             self.drag = (p[0], p[1], self.rot[0], self.rot[1])
 
     def drag_move(self, e):
+        if self.adrag is not None:
+            self.atmo_drag_move(e)
+            return
         p = self.sheet_xy(e)
         if self.bdrag is not None:
             if p is None:
@@ -3418,6 +4125,9 @@ class App(tk.Tk):
         return gg.chain_entry(new)
 
     def drag_end(self, _e=None):
+        if self.adrag is not None:
+            self.atmo_drag_end()
+            return
         if self.bdrag is not None:
             d = self.bdrag
             self.bdrag = None
@@ -3503,14 +4213,14 @@ class App(tk.Tk):
     def update_live_label(self, key=None):
         if not self.live_on.get():
             txt = ''
-        elif self.view.get() != 'bands':
+        elif self.view.get() not in ('bands', 'atmo'):
             txt = ''
         elif self.proc:
             txt = 'swirls wait while building'
         elif self.live_err:
             txt = 'swirls failed: %s' % self.live_err[:60]
         else:
-            key = key or json.dumps(self.P, sort_keys=True, default=str)
+            key = key or self.live_key()
             L = self.live_last
             if L is not None and L['key'] == key:
                 txt = 'swirls %d px \u00b7 %.1f s' % (L['W'], L['dt'])
@@ -3533,7 +4243,7 @@ class App(tk.Tk):
         self.update_view()
 
     def request_live(self, key):
-        if not self.live_on.get() or self.view.get() != 'bands':
+        if not self.live_on.get() or self.view.get() not in ('bands', 'atmo'):
             return
         if self.live_after:
             self.after_cancel(self.live_after)
@@ -3614,11 +4324,12 @@ class App(tk.Tk):
         except tk.TclError:
             return
         if got:
-            if self.view.get() == 'bands':
+            if self.view.get() in ('bands', 'atmo'):
                 self.update_view(from_live=True)
             else:
                 self.update_live_label()
             self.ring_schedule()
+        self.atmo_poll()
         try:
             self.after(120, self.live_poll)
         except tk.TclError:
@@ -3636,6 +4347,10 @@ class App(tk.Tk):
         if self.redraw_id:
             self.after_cancel(self.redraw_id)
         self.redraw_id = self.after(60, self.redraw)
+        if self.view.get() == 'atmo':
+            if getattr(self, 'atmo_resize', None):
+                self.after_cancel(self.atmo_resize)
+            self.atmo_resize = self.after(400, self.atmo_request)
 
     def redraw(self, fast=False):
         self.redraw_id = None
@@ -3643,7 +4358,10 @@ class App(tk.Tk):
         cw, ch = max(10, self.canvas.winfo_width()), max(10, self.canvas.winfo_height())
         if self.view_src is None:
             self.view_geom = None
-            self.canvas.create_text(cw // 2, ch // 2, text='No picture yet', fill=DIM, font=(FONT, 12))
+            txt = 'No picture yet'
+            if self.view.get() == 'atmo':
+                txt = 'Drawing the atmosphere…' if gg.has_atmo(self.P) else 'No atmosphere – tick “Scatterer atmosphere” in the Atmosphere tab'
+            self.canvas.create_text(cw // 2, ch // 2, text=txt, fill=DIM, font=(FONT, 12))
             return
         iw, ih = self.view_src.size
         s = min((cw - 16) / iw, (ch - 16) / ih)

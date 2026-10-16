@@ -68,6 +68,12 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
 - **Rings:** a ring texture for Kopernicus rings with wide zones, fine ringlets, gaps and
   soft edges, coloured from the planet's bands or your own colours. The Rings tab shows
   the planet with its rings (with shadows) and gives you the Kopernicus config to paste.
+- **Atmosphere:** a Scatterer atmosphere with Scatterer's own values (HR, m_betaR, HM,
+  BETA_MSca, m_mieG, ozone, config points with their exposures and so on). The **In game**
+  view shows the planet with that atmosphere the way KSP's map view does, as a whole planet
+  or close up at the day-side or sunset edge. **Load from Scatterer config...** reads an
+  existing atmo.cfg, and the tab gives you the atmo.cfg and the planet list entry to paste
+  or save.
 - **Randomize:** every tab has its own Randomize button. **Surprise me** randomizes
   everything at once, and **Undo** (or Ctrl+Z) goes back.
 - **Live preview:** while you edit, the preview shows the real swirls by itself a moment
@@ -85,6 +91,7 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
   | Flow map | `.truecolor` (EVE), PNG |
   | Emissive map | DDS (BC1/DXT1 KSP-ready, BC3/DXT5, BC7), PNG |
   | Ring texture | DDS (BC3/DXT5 with alpha, BC7), PNG |
+  | Scatterer config | `.cfg` (atmo.cfg and the planet list entry) |
   | Preview sheet | PNG, JPG |
 
 - **Flow Map Maker:** makes EVE flow maps for **any** gas giant texture, including ones
@@ -101,6 +108,8 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
 ![Rings](docs/rings.png)
 
 ![Storm chains on the map](docs/map_tools.png)
+
+![Atmosphere](docs/atmosphere.png)
 
 ![Flow Map Maker](docs/flow_maps.png)
 
@@ -210,6 +219,65 @@ Rings
 The ring texture is a long thin strip. Its left end is the outer edge of the ring and its
 right end the inner edge, because that is how Kopernicus maps it.
 
+### Scatterer atmosphere
+
+The Atmosphere tab writes a normal Scatterer config. The atmosphere goes into any .cfg
+file in your mod, for example `GameData/MyPlanets/Scatterer/Planets/MyGiant/atmo.cfg`:
+
+```
+Scatterer_atmosphere
+{
+	Atmo
+	{
+		name = MyGiant
+		atmosphereStartRadiusScale = 1
+		HR = 45
+		HM = 5
+		m_betaR = 0.000152,0.0027,0.00878
+		BETA_MSca = 0.004,0.004,0.004
+		m_mieG = 0.8
+		...
+		configPoints
+		{
+			Item
+			{
+				altitude = 0
+				skyExposure = 0.18
+				...
+			}
+		}
+	}
+}
+```
+
+Scatterer only draws planets that are in its planet list, so the tab also gives you the
+entry for that:
+
+```
+@Scatterer_planetsList:AFTER[Kopernicus]
+{
+	@scattererCelestialBodies
+	{
+		Item
+		{
+			celestialBodyName = MyGiant
+			transformName = MyGiant
+			mainSunCelestialBody = Sun
+			...
+		}
+	}
+}
+```
+
+The units are Scatterer's: HR, HM and the ozone height in km, the scattering values per km.
+Scatterer works out the top of the atmosphere from them and takes the radius from the
+planet itself, so the radius in the tab is only for the picture. The map view uses the
+last config point (the highest altitude), and so does the In game view. Scatterer builds
+its tables in game the first time it sees new values, which takes a few seconds.
+
+The In game view is a close match, not a copy of the game: KSP's own lighting, EVE clouds,
+godrays and the rim and shine values are not in it.
+
 ## Presets
 
 Every planet is one small JSON file in `presets/`. Eight examples come with it:
@@ -218,7 +286,7 @@ Every planet is one small JSON file in `presets/`. Eight examples come with it:
 |---|---|
 | Lavender | pastel lavender and peach bands with lots of curls and a glowing peach band |
 | NeptuneBlue | pale blue with one deep blue band of wispy streaks |
-| NeptuneStorm | the same with a big dark spiral storm |
+| NeptuneStorm | the same with a big dark spiral storm and a Scatterer atmosphere |
 | TealBands | teal and cream bands with a big pale storm with two arms |
 | Jovian | Jupiter-like belts with a red storm and a dark belt that stops at the storm |
 | JovianPoles | the same with Jupiter's rings of cyclones at both poles |
@@ -234,7 +302,7 @@ Everything the window does also works from the command line, which is handy for 
 
 ```
 python gasgiant.py make Lavender --res 1024
-python gasgiant.py export Lavender --res 1024 --to export --color bc7 --normal dds --emissive png --ring none
+python gasgiant.py export Lavender --res 1024 --to export --color bc7 --normal dds --emissive png --ring none --atmo none
 python gasgiant.py new MyGiant --template NeptuneBlue
 python gasgiant.py flow MyGiant
 python gasgiant.py sample picture.jpg X1 Y1 X2 Y2 --lat 70 -70

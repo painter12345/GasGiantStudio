@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.1.7
+
+- Atmosphere: a new Atmosphere tab makes a Scatterer atmosphere for the planet, with
+  Scatterer's own values: atmosphereStartRadiusScale, HR and m_betaR (Rayleigh, the colour
+  of the sky), HM, BETA_MSca and m_mieG (Mie, the haze), the ozone layer (useOzone,
+  ozoneAbsorption, ozoneHeight, ozoneFalloff), averageGroundReflectance,
+  multipleScattering, godrayStrength and the config points (altitude, skyExposure,
+  scatteringExposure, skyAlpha, skyExtinctionTint, extinctionThickness, extinctionTint,
+  postProcessAlpha, postProcessDepth). Other Scatterer values (rim, shine, cloud and
+  scaled-texture settings) are kept and written back as they are.
+- In game view: a new view next to the live preview shows the planet with its atmosphere
+  the way KSP's map view shows it, using the last config point: the whole planet, a
+  close-up of the day-side edge or of the sunset edge. It renders Rayleigh and Mie
+  scattering with multiple scattering and the ozone layer in the same units as Scatterer,
+  and puts the light on the planet and the sky the way Scatterer's scaled-space shaders
+  do. Drag left or right (or use the Sun angle slider) to move the sun. It uses the
+  current build when it is up to date, otherwise the live swirls.
+- Sky colour... and Haze colour... set the scattering values from a colour, Match the
+  planet takes the sky colour from the bands, and Start from fills in stock Jool, stock
+  Kerbin or Earth-like values.
+- Load from Scatterer config... reads an existing atmo.cfg (and the planet's sun, sun
+  colour and eclipse casters from the planet list next to it). Read from Kopernicus config
+  finds the planet's radius in your mod. When you switch the atmosphere on and your mod
+  already has a Scatterer config for the planet, it offers to start from it.
+- The tab shows the atmo.cfg and the planet list entry to copy. Save atmo.cfg... backs up
+  the old file first and offers to write the planet list entry when the planet is not in
+  Scatterer's list yet. Export has a new "Scatterer config" row; command line:
+  `export --atmo cfg|none`.
+- The preview sheet shows the planet with its atmosphere when it has one.
+- NeptuneStorm now has an atmosphere.
+- The swirl info moved to the tool row so the Export button always fits.
+- Planets without an atmosphere come out exactly as before.
+
 ## 1.1.6
 
 - Rings: a new Rings tab makes a ring texture for Kopernicus. Inner and outer edge, tilt,
