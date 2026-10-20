@@ -4,7 +4,7 @@ from PIL import Image, ImageFilter, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.11'
+APP_VERSION = '1.1.12'
 VERSION = '5'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -1013,8 +1013,7 @@ def atmo_planets(P, name=None):
            t + 'flatScaledSpaceModel = ' + cfg_val(bool(e['flat_model'])),
            t + 'usesCloudIntegration = ' + cfg_val(bool(e['cloud_integration'])),
            t + 'cloudIntegrationUsesScattererSunColors = False',
-           t + 'mainSunCelestialBody = ' + (str(e['sun']).strip() or 'Sun'),
-           t + 'autoMainSun = True']
+           t + 'mainSunCelestialBody = ' + (str(e['sun']).strip() or 'Sun')]
     if list(e['sun_color']) != [255, 255, 255]:
         out.append(t + 'sunColor = %s,1' % cfg_vec([round(c / 255.0, 3) for c in e['sun_color']]))
     out.append(t + 'sunsUseIntensityCurves = False')
