@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.1.11
+
+- In game view: now also shows the aurora (strongest on the night side) next to the glowing bands
+  and heat glow. Both can be switched off on the Atmosphere tab ("In game view also shows").
+- In game view: works without a Scatterer atmosphere too, as soon as the planet has an aurora or
+  something that glows.
+
+## 1.1.10
+
+- Aurora: a new Aurora tab makes polar lights around each magnetic pole: glowing curtains
+  with rays, a lower fringe, bright cores and a red and purple top part. Magnetic tilt per
+  pole, oval size and wobble, a dark centre, the number, spacing and width of the curtains,
+  gaps, rays, diffuse glow, brightness and six colours can be set, and a seed gives a new
+  pattern.
+- Aurora view: a new view next to In game shows both poles from above with all layers.
+- Export: "Aurora (EVE)" writes <name>_aurora and <name>_aurora_top (DDS DXT5 or PNG, at
+  the size set on the tab) and <name>_aurora.cfg, an EVE config that stacks them as thin
+  layers from the lowest layer up, fading towards the top. From the command line:
+  `--aurora dds|png|none`.
+- Changing the aurora does not mark the build as out of date.
+- The Live swirls switch and its size moved to the Build row, so the view buttons fit.
+
+## 1.1.9
+
+- Storm arms: the arms now lie on top of the bands like the storms do, instead of the bands
+  showing through them. Arm strength now sets how solid an arm is (1 = fully covering), and
+  the cloud texture inside an arm only changes its brightness, not how much band shows through.
+  The arm texture and the ragged arm edges no longer follow the band swirls.
+- Builds made with an older version are rebuilt instead of reused.
+
+## 1.1.8
+
+- Atmosphere: fixed the black layer Scatterer drew around the planet. atmo.cfg was written with
+  specR, specG, specB and shininess at 0; it now uses specR/G/B 1 and shininess 10, like stock Jool. Presets and
+  atmo.cfg files that still have shininess 0 (or all three spec values at 0) are repaired when
+  they are loaded, and any of the other Scatterer values that are missing are filled in.
+- Planet list entry: now also writes cloudIntegrationUsesScattererSunColors = False and
+  autoMainSun = True, so a planet around another star is lit by that star.
+
 ## 1.1.7
 
 - Atmosphere: a new Atmosphere tab makes a Scatterer atmosphere for the planet, with

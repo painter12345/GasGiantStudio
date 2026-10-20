@@ -1,5 +1,4 @@
 {
- "name": "Jovian",
  "seed": 777,
  "steps": 100,
  "keyframes": 4,
@@ -107,30 +106,264 @@
   ]
  ],
  "band_blend": 3.6,
+ "emission": [],
  "band_shapes": [
   {
    "band": 5,
    "points": [
     [
-     190,
-     0
+     80.0,
+     1.0
     ],
     [
-     212,
-     1
+     130.0,
+     0.0
     ],
     [
-     80,
-     1
+     190.0,
+     0.0
     ],
     [
-     130,
-     0
+     212.0,
+     1.0
     ]
    ]
   }
  ],
- "emission": [],
+ "poles": {
+  "north": {
+   "type": "none",
+   "lat": 76.0,
+   "sides": 6,
+   "roundness": 0.3,
+   "rotation": 0.0,
+   "jet": 1.0,
+   "wobble": 0.15,
+   "band": 0.6,
+   "band_width": 4.0,
+   "band_color": null,
+   "turns": 0.8,
+   "spin": 1,
+   "ring_lat": 80.0,
+   "count": 8,
+   "size": 0.011,
+   "centre": 1,
+   "cap_lat": 66.0,
+   "cap_color": null,
+   "texture": 0.8,
+   "texture_color": null,
+   "eye": 0.45,
+   "eye_color": null,
+   "eye_size": 0.45
+  },
+  "south": {
+   "type": "none",
+   "lat": 76.0,
+   "sides": 6,
+   "roundness": 0.3,
+   "rotation": 0.0,
+   "jet": 1.0,
+   "wobble": 0.15,
+   "band": 0.6,
+   "band_width": 4.0,
+   "band_color": null,
+   "turns": 0.8,
+   "spin": 1,
+   "ring_lat": 80.0,
+   "count": 5,
+   "size": 0.011,
+   "centre": 1,
+   "cap_lat": 66.0,
+   "cap_color": null,
+   "texture": 0.8,
+   "texture_color": null,
+   "eye": 0.45,
+   "eye_color": null,
+   "eye_size": 0.45
+  }
+ },
+ "heat_glow": {
+  "strength": 0.0,
+  "dim_color": [
+   130,
+   14,
+   4
+  ],
+  "bright_color": [
+   255,
+   120,
+   28
+  ],
+  "dark": 0.7,
+  "poles": 0.4,
+  "patches": 0.3
+ },
+ "storm_chains": [],
+ "rings": {
+  "enabled": false,
+  "inner": 1.35,
+  "outer": 2.3,
+  "angle": 0.0,
+  "opacity": 0.85,
+  "zones": 4,
+  "ringlets": 0.6,
+  "detail": 1.0,
+  "edge": 0.3,
+  "variation": 0.4,
+  "gaps": [
+   [
+    0.62,
+    0.035,
+    1.0
+   ],
+   [
+    0.88,
+    0.008,
+    0.9
+   ]
+  ],
+  "inner_color": null,
+  "middle_color": null,
+  "outer_color": null,
+  "size": 2048,
+  "pattern": 0,
+  "view": 18.0
+ },
+ "atmosphere": {
+  "enabled": true,
+  "radius": 6000.0,
+  "atmosphereStartRadiusScale": 0.989,
+  "HR": 46.4,
+  "HM": 5.57,
+  "m_betaR": [
+   0.00735927,
+   0.00478422,
+   0.00271502
+  ],
+  "BETA_MSca": [
+   0.005782,
+   0.005782,
+   0.005782
+  ],
+  "m_mieG": 0.85,
+  "useOzone": false,
+  "ozoneAbsorption": [
+   0.0003426,
+   0.0008298,
+   3.6e-05
+  ],
+  "ozoneHeight": 25.0,
+  "ozoneFalloff": 15.0,
+  "averageGroundReflectance": 0.1,
+  "multipleScattering": true,
+  "godrayStrength": 0.8,
+  "configPoints": [
+   {
+    "altitude": 0.0,
+    "skyExposure": 0.2,
+    "skyAlpha": 1.0,
+    "skyExtinctionTint": 1.0,
+    "scatteringExposure": 0.2,
+    "extinctionThickness": 1.0,
+    "postProcessAlpha": 1.0,
+    "postProcessDepth": 0.0,
+    "extinctionTint": 1.0
+   }
+  ],
+  "sun": "Sun",
+  "sun_color": [
+   255,
+   255,
+   255
+  ],
+  "cloud_integration": true,
+  "flat_model": true,
+  "eclipse_casters": "",
+  "sun_angle": 65,
+  "view": "planet",
+  "extra": [
+   [
+    "flattenScaledSpaceMesh",
+    "0"
+   ],
+   [
+    "rimBlend",
+    "20"
+   ],
+   [
+    "rimpower",
+    "600"
+   ],
+   [
+    "specR",
+    "1"
+   ],
+   [
+    "specG",
+    "1"
+   ],
+   [
+    "specB",
+    "1"
+   ],
+   [
+    "shininess",
+    "10"
+   ],
+   [
+    "noonSunlightExtinctionStrength",
+    "1"
+   ],
+   [
+    "cloudColorMultiplier",
+    "1"
+   ],
+   [
+    "cloudScatteringMultiplier",
+    "0.2"
+   ],
+   [
+    "cloudSkyIrradianceMultiplier",
+    "0"
+   ],
+   [
+    "volumetricsColorMultiplier",
+    "1"
+   ],
+   [
+    "EVEIntegration_preserveCloudColors",
+    "True"
+   ],
+   [
+    "adjustScaledTexture",
+    "False"
+   ],
+   [
+    "scaledLandBrightnessAdjust",
+    "1"
+   ],
+   [
+    "scaledLandContrastAdjust",
+    "1"
+   ],
+   [
+    "scaledLandSaturationAdjust",
+    "1"
+   ],
+   [
+    "scaledOceanBrightnessAdjust",
+    "1"
+   ],
+   [
+    "scaledOceanContrastAdjust",
+    "1"
+   ],
+   [
+    "scaledOceanSaturationAdjust",
+    "1"
+   ]
+  ]
+ },
  "edges": [
   {
    "lat": 55,
@@ -201,8 +434,10 @@
  ],
  "curl_strength": 12.0,
  "curl_spacing": 6.5,
+ "curl_window": 7.0,
  "jets": 0.12,
  "turbulence": 0.0007,
+ "turbulence_scale": 4.5,
  "edge_wobble": 2.6,
  "polar_calm": [
   60,
@@ -211,6 +446,42 @@
  "polar_smooth": [
   50,
   64
+ ],
+ "band_wobble": 1.3,
+ "stripes": [
+  1.6,
+  0.7
+ ],
+ "sub_bands": 0.045,
+ "sub_band_waves": [
+  [
+   0.5,
+   0.83,
+   0.4
+  ],
+  [
+   0.3,
+   2.1,
+   2.2
+  ],
+  [
+   0.2,
+   4.7,
+   1.1
+  ]
+ ],
+ "sub_band_warm": [
+  6,
+  4,
+  0
+ ],
+ "mottle": 0.035,
+ "threads": 0.15,
+ "thread_width": 0.075,
+ "thread_color": [
+  245,
+  240,
+  232
  ],
  "storms": {
   "count": 10,
@@ -246,14 +517,84 @@
     105,
     55
    ],
-   "ragged": 0.15
+   "ragged": 0.15,
+   "arms": 0,
+   "arm_length": 2.5,
+   "arm_width": 0.2,
+   "arm_curl": 1.0,
+   "arm_strength": 0.85,
+   "arm_color": null
   }
  ],
  "blur": 0.75,
  "normal_strength": 6.0,
- "thread_color": [
-  245,
-  240,
-  232
- ]
+ "flow": {
+  "zonal_std": 40.0,
+  "meridional_std": 6.0,
+  "smooth": 2.0
+ },
+ "preview": {
+  "tilt": -22,
+  "view_lat": 12,
+  "view_lon": 175.0
+ },
+ "name": "Jovian",
+ "aurora": {
+  "enabled": true,
+  "seed": 1,
+  "north": true,
+  "south": true,
+  "north_tilt": 8.0,
+  "north_lon": 40.0,
+  "south_tilt": 10.0,
+  "south_lon": 215.0,
+  "oval": 17.0,
+  "wobble": 7.0,
+  "polar_gap": 0.0,
+  "curtains": 4,
+  "spread": 1.0,
+  "width": 1.5,
+  "patchy": 0.5,
+  "rays": 0.65,
+  "glow": 0.16,
+  "brightness": 0.9,
+  "color": [
+   158,
+   41,
+   255
+  ],
+  "edge_color": [
+   242,
+   97,
+   217
+  ],
+  "core_color": [
+   140,
+   255,
+   204
+  ],
+  "top_color": [
+   230,
+   56,
+   128
+  ],
+  "top_edge_color": [
+   128,
+   71,
+   255
+  ],
+  "top_core_color": [
+   255,
+   128,
+   191
+  ],
+  "layers": 7,
+  "top_layers": 3,
+  "altitude": 17000.0,
+  "spacing": 2500.0,
+  "opacity": 130,
+  "fade": 0.42,
+  "speed": 12.0,
+  "size": 4096
+ }
 }

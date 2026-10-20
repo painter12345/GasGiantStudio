@@ -4,8 +4,8 @@ from PIL import Image, ImageFilter, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.7'
-VERSION = '4'
+APP_VERSION = '1.1.11'
+VERSION = '5'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
 ROOT = os.path.abspath(os.path.join(TOOL, '..', '..'))
@@ -104,6 +104,7 @@ BIG_STORM = {'lat': -20.0, 'lon': 180.0, 'size': 0.025, 'aspect': 1.3, 'turns': 
 STORM_MIXR = np.float32(0.9)
 STORM_MIX = np.float32(1.0)
 STORM_HOLD = np.float32(1.5)
+ARM_COVER = np.float32(1.3)
 EMISSION = {'band': 0, 'color': None, 'brightness': 0.5}
 
 
@@ -155,6 +156,10 @@ def storm_marks(s, r, th, seed, k, jit=None):
         dist = np.abs(d * np.maximum(rho, rho0) / tilt + (0 if jit is None else jit * w))
         arms = np.maximum(arms, np.maximum(np.exp(-(dist / w) ** 4), 0.4 * np.exp(-(dist / (2.5 * w)) ** 2)))
     return core, arms * env * np.float32(s['arm_strength'])
+
+
+def arm_cover(a):
+    return np.clip(a * ARM_COVER, 0, 1)
 
 
 POLE = {'type': 'none', 'lat': 76.0, 'sides': 6, 'roundness': 0.3, 'rotation': 0.0, 'jet': 1.0, 'wobble': 0.15,
@@ -502,8 +507,8 @@ ATMO_POINT_KEYS = ('altitude', 'skyExposure', 'skyAlpha', 'skyExtinctionTint', '
                    'postProcessAlpha', 'postProcessDepth', 'extinctionTint')
 ATMO_VALUES = ('atmosphereStartRadiusScale', 'HR', 'HM', 'm_betaR', 'BETA_MSca', 'm_mieG', 'ozoneAbsorption', 'ozoneHeight',
                'ozoneFalloff', 'useOzone', 'averageGroundReflectance', 'multipleScattering', 'godrayStrength')
-ATMO_EXTRA = [['flattenScaledSpaceMesh', '0'], ['rimBlend', '20'], ['rimpower', '600'], ['specR', '0'], ['specG', '0'],
-              ['specB', '0'], ['shininess', '0'], ['noonSunlightExtinctionStrength', '1'], ['cloudColorMultiplier', '1'],
+ATMO_EXTRA = [['flattenScaledSpaceMesh', '0'], ['rimBlend', '20'], ['rimpower', '600'], ['specR', '1'], ['specG', '1'],
+              ['specB', '1'], ['shininess', '10'], ['noonSunlightExtinctionStrength', '1'], ['cloudColorMultiplier', '1'],
               ['cloudScatteringMultiplier', '0.2'], ['cloudSkyIrradianceMultiplier', '0'], ['volumetricsColorMultiplier', '1'],
               ['EVEIntegration_preserveCloudColors', 'True'], ['adjustScaledTexture', 'False'], ['scaledLandBrightnessAdjust', '1'],
               ['scaledLandContrastAdjust', '1'], ['scaledLandSaturationAdjust', '1'], ['scaledOceanBrightnessAdjust', '1'],
@@ -577,8 +582,26 @@ def atmo_entry(a):
         e['view'] = 'planet'
     if not isinstance(e['extra'], list):
         e['extra'] = copy.deepcopy(ATMO_EXTRA)
-    e['extra'] = [[str(k), str(v)] for k, v in e['extra'] if str(k) not in ATMO_VALUES and str(k) not in ('name', 'configPoints')]
+    e['extra'] = atmo_fix_extra([[str(k), str(v)] for k, v in e['extra'] if str(k) not in ATMO_VALUES and str(k) not in ('name', 'configPoints')])
     return e
+
+
+def atmo_fix_extra(extra):
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+    d = dict(ATMO_EXTRA)
+    have = {k for k, v in extra}
+    out = [list(x) for x in extra] + [list(x) for x in ATMO_EXTRA if x[0] not in have]
+    cur = dict(out)
+    bad = set()
+    if num(cur.get('shininess')) <= 0:
+        bad.add('shininess')
+    if all(num(cur.get(k)) <= 0 for k in ('specR', 'specG', 'specB')):
+        bad.update(('specR', 'specG', 'specB'))
+    return [[k, d[k] if k in bad else v] for k, v in out]
 
 
 def has_atmo(P):
@@ -849,7 +872,40 @@ def atmo_frame(e, view, w, h, m):
     return u, v, 1.0 / sc
 
 
-def render_atmo(P, tex, emis=None, view=None, w=560, h=360, rot=(0.0, 0.0), steps=16, chunk=60000, cancel=None):
+def ingame_glow(P, W=1024, cancel=None):
+    if not has_aurora(P):
+        return None
+    e = aurora_entry(P.get('aurora'))
+    low, top = aurora_maps(P, W, cancel=cancel)
+    nl = max(1, e['layers'] - e['top_layers']); nt = e['top_layers']
+    ol = 1 - (1 - min(1.0, e['opacity'] / 255.0)) ** min(nl, 3)
+    ot = (1 - (1 - min(1.0, e['opacity'] * (0.5 + 0.5 * e['fade']) / 255.0)) ** min(nt, 3)) * 0.6 if nt else 0.0
+    return (low[..., :3] * low[..., 3:4] * np.float32(ol) + top[..., :3] * top[..., 3:4] * np.float32(ot)).astype(np.float32)
+
+
+def render_ingame(P, tex, emis=None, view=None, w=560, h=360, rot=(0.0, 0.0), steps=16, cancel=None, glow=None, bg=(13, 15, 20)):
+    if has_atmo(P):
+        return render_atmo(P, tex, emis, view, w, h, rot, steps, cancel=cancel, glow=glow)
+    e = atmo_entry(P.get('atmosphere'))
+    pv = P.get('preview', {'tilt': 0, 'view_lat': 0, 'view_lon': 0})
+    vlat = max(-90.0, min(90.0, float(pv.get('view_lat', 0)) + rot[1])); vlon = float(pv.get('view_lon', 0)) + rot[0]
+    em = emis
+    if glow is not None:
+        G = glow
+        if G.shape[:2] != tex.shape[:2]:
+            G = np.asarray(Image.fromarray((np.clip(G, 0, 1) * 255).astype(np.uint8)).resize((tex.shape[1], tex.shape[0]), Image.BILINEAR), np.float32) / 255
+        em = G if em is None else em + G
+    S = max(40, min(w, h) - 8)
+    g = render_sphere(tex, S, float(pv.get('tilt', 0)), vlat, vlon, em, [float(v) for v in atmo_light(e)])
+    out = Image.new('RGB', (w, h), tuple(bg))
+    yy, xx = np.mgrid[0:S, 0:S]
+    rr = np.sqrt(((xx + 0.5) / S * 2 - 1) ** 2 + ((yy + 0.5) / S * 2 - 1) ** 2)
+    mask = Image.fromarray((np.clip((1 - rr) * S / 2 + 0.5, 0, 1) * 255).astype(np.uint8), 'L')
+    out.paste(g, ((w - S) // 2, (h - S) // 2), mask)
+    return out
+
+
+def render_atmo(P, tex, emis=None, view=None, w=560, h=360, rot=(0.0, 0.0), steps=16, chunk=60000, cancel=None, glow=None):
     e = atmo_entry(P.get('atmosphere'))
     m = atmo_model(e)
     view = view or e['view']
@@ -888,7 +944,11 @@ def render_atmo(P, tex, emis=None, view=None, w=560, h=360, rot=(0.0, 0.0), step
         E = np.maximum(0, np.float32(1 - pt['extinctionThickness']) + np.float32(pt['extinctionThickness']) * E)
         S = scatterer_hdr(Lin * sun, pt['scatteringExposure'])
         CE = C * E
-        flat[idx] += (CE + S * (1 - CE)) * covf[idx][:, None]
+        px_ = CE + S * (1 - CE)
+        if glow is not None:
+            nd_ = np.clip(uu * L[0] + vv * L[1] + zg * L[2], 0, 1)
+            px_ = px_ + sphere_sample(glow, uu, vv, zg, tilt, vlat, vlon) * (1 - np.float32(0.75) * nd_)[:, None]
+        flat[idx] += px_ * covf[idx][:, None]
     for c0 in range(0, len(si), chunk):
         idx = si[c0:c0 + chunk]
         bb = np.maximum(bf[idx], np.float32(max(1.0, m.Rg) + 1e-6))
@@ -952,7 +1012,9 @@ def atmo_planets(P, name=None):
            t + 'loadDistance = 1000000000', t + 'unloadDistance = 2000000000', t + 'hasOcean = False',
            t + 'flatScaledSpaceModel = ' + cfg_val(bool(e['flat_model'])),
            t + 'usesCloudIntegration = ' + cfg_val(bool(e['cloud_integration'])),
-           t + 'mainSunCelestialBody = ' + (str(e['sun']).strip() or 'Sun')]
+           t + 'cloudIntegrationUsesScattererSunColors = False',
+           t + 'mainSunCelestialBody = ' + (str(e['sun']).strip() or 'Sun'),
+           t + 'autoMainSun = True']
     if list(e['sun_color']) != [255, 255, 255]:
         out.append(t + 'sunColor = %s,1' % cfg_vec([round(c / 255.0, 3) for c in e['sun_color']]))
     out.append(t + 'sunsUseIntensityCurves = False')
@@ -1266,6 +1328,7 @@ def normalize(P):
     P['storm_chains'] = [chain_entry(c) for c in P.get('storm_chains', [])]
     P['rings'] = ring_entry(P.get('rings'))
     P['atmosphere'] = atmo_entry(P.get('atmosphere'))
+    P['aurora'] = aurora_entry(P.get('aurora'))
     P.pop('glows', None)
     sort_bands(P)
     return P
@@ -1827,12 +1890,12 @@ class Field:
         X0, Y0, Z0 = sph(la0, lo0)
         jit = tex = None
         if any(int(bs.get('arms', 0)) > 0 for bs in self.big):
-            jit = 0.9 * fbm(T4, X0 * 9 + 2.7, Y0 * 9, Z0 * 9, o=3)
-            tex = np.clip(0.75 + 1.6 * fbm(T3, X0 * 11 + 5.1, Y0 * 11, Z0 * 11, o=3), 0, 1)
+            jit = 0.9 * fbm(T4, XF * 9 + 2.7, YF * 9, ZF * 9, o=3)
+            tex = np.clip(0.75 + 1.6 * fbm(T3, XF * 11 + 5.1, YF * 11, ZF * 11, o=3), 0, 1)
         marks = []
         for j, (bs, (r, th)) in enumerate(zip(self.big, pol)):
             c, a = storm_marks(bs, r, th, P['seed'], j, jit)
-            marks.append((c, None if a is None else a * tex))
+            marks.append((c, None if a is None else (arm_cover(a), np.float32(0.86) + np.float32(0.28) * tex)))
         del pol, jit, tex
         ps = P['polar_smooth']
         fp = 1 - ss(np.float32(ps[0] * D), np.float32(ps[1] * D), np.abs(la0))
@@ -1918,8 +1981,9 @@ class Field:
                 em *= (1 - w)[..., None]
         for bs, (w, aw) in zip(self.big, marks):
             if aw is not None:
-                ac = bs.get('arm_color') or bs['core_color']
-                col = col * (1 - aw[..., None]) + np.array(ac, np.float32) * aw[..., None]
+                aw, at = aw
+                ac = np.array(bs.get('arm_color') or bs['core_color'], np.float32)
+                col = col * (1 - aw[..., None]) + np.clip(ac * at[..., None], 0, 255) * aw[..., None]
                 if em is not None:
                     em *= (1 - aw)[..., None]
             col = col * (1 - w[..., None]) + np.array(bs['core_color'], np.float32) * w[..., None]
@@ -2033,7 +2097,7 @@ def out_dir(P, res):
 
 
 def work_dir(P, raw, res):
-    h = hashlib.sha1((VERSION + json.dumps(raw, sort_keys=True) + str(res)).encode()).hexdigest()[:12]
+    h = hashlib.sha1((VERSION + json.dumps({k: v for k, v in raw.items() if k != 'aurora'}, sort_keys=True) + str(res)).encode()).hexdigest()[:12]
     d = os.path.join(tempfile.gettempdir(), 'gasgiant_work', '%s_%d_%s' % (P['name'], res, h))
     os.makedirs(d, exist_ok=True)
     return d
@@ -2084,10 +2148,340 @@ EXPORT_FORMATS = {
     'preview': ['PNG', 'JPG'],
     'ring': [DDS_BC3, DDS_BC7, 'PNG'],
     'atmo': ['Scatterer cfg'],
+    'aurora': [DDS_BC3, 'PNG'],
 }
 FMT_EXT = {DDS_BC1: '.dds', DDS_BC3: '.dds', DDS_BC7: '.dds', DDS_NM: '.dds', DDS_BC5: '.dds', 'PNG': '.png',
            'JPG': '.jpg', 'TGA': '.tga', 'BMP': '.bmp', 'truecolor (EVE)': '.truecolor', 'Scatterer cfg': '.cfg'}
 PIL_FMT = {'PNG': 'PNG', 'JPG': 'JPEG', 'TGA': 'TGA', 'BMP': 'BMP'}
+
+
+AURORA = {'enabled': False, 'seed': 1, 'north': True, 'south': True,
+          'north_tilt': 8.0, 'north_lon': 40.0, 'south_tilt': 10.0, 'south_lon': 215.0,
+          'oval': 17.0, 'wobble': 7.0, 'polar_gap': 0.0,
+          'curtains': 4, 'spread': 1.0, 'width': 1.5, 'patchy': 0.5, 'rays': 0.65, 'glow': 0.16, 'brightness': 0.9,
+          'color': [41, 255, 107], 'edge_color': [242, 97, 217], 'core_color': [140, 255, 204],
+          'top_color': [230, 56, 128], 'top_edge_color': [128, 71, 255], 'top_core_color': [255, 128, 191],
+          'layers': 7, 'top_layers': 3, 'altitude': 17000.0, 'spacing': 2500.0, 'opacity': 130, 'fade': 0.42,
+          'speed': 12.0, 'size': 4096}
+AURORA_COLOURS = ('color', 'edge_color', 'core_color', 'top_color', 'top_edge_color', 'top_core_color')
+AURORA_SIZES = (1024, 2048, 4096, 8192)
+AURORA_CURTAINS = ((0.0, 0.37, 0.68, 1.0), (4.8, 0.42, 0.76, 0.8), (-3.4, 0.46, 0.8, 0.6), (8.5, 0.5, 0.84, 0.5),
+                   (-6.8, 0.52, 0.86, 0.42), (12.0, 0.55, 0.88, 0.36))
+AURORA_COVERAGE = 'StockVolumetricClouds/Clouds/Textures/PluginData/Kerbin/base/coverage'
+AURORA_UVNOISE = 'StockVolumetricClouds/Clouds/Textures/PluginData/uvnoise1'
+
+
+def aurora_entry(a):
+    e = copy.deepcopy(AURORA)
+    a = a if isinstance(a, dict) else {}
+    for k, v in a.items():
+        if k in AURORA:
+            e[k] = copy.deepcopy(v)
+    for k in ('enabled', 'north', 'south'):
+        e[k] = bool(e[k])
+    for k in ('north_tilt', 'north_lon', 'south_tilt', 'south_lon', 'oval', 'wobble', 'polar_gap', 'spread', 'width',
+              'patchy', 'rays', 'glow', 'brightness', 'altitude', 'spacing', 'fade', 'speed'):
+        try:
+            e[k] = float(e[k])
+        except (TypeError, ValueError):
+            e[k] = float(AURORA[k])
+    for k in ('seed', 'curtains', 'layers', 'top_layers', 'opacity', 'size'):
+        try:
+            e[k] = int(round(float(e[k])))
+        except (TypeError, ValueError):
+            e[k] = int(AURORA[k])
+    for k in AURORA_COLOURS:
+        try:
+            e[k] = [int(max(0, min(255, round(float(c))))) for c in e[k]][:3]
+            if len(e[k]) != 3:
+                raise ValueError
+        except (TypeError, ValueError):
+            e[k] = list(AURORA[k])
+    e['curtains'] = max(1, min(len(AURORA_CURTAINS), e['curtains']))
+    e['layers'] = max(1, min(16, e['layers']))
+    e['top_layers'] = max(0, min(e['layers'], e['top_layers']))
+    e['opacity'] = max(0, min(255, e['opacity']))
+    e['fade'] = max(0.0, min(1.0, e['fade']))
+    e['oval'] = max(1.0, min(60.0, e['oval']))
+    e['wobble'] = max(0.0, e['wobble'])
+    e['polar_gap'] = max(0.0, e['polar_gap'])
+    e['spread'] = max(0.1, e['spread'])
+    e['width'] = max(0.1, e['width'])
+    for k in ('patchy', 'rays'):
+        e[k] = max(0.0, min(1.0, e[k]))
+    e['glow'] = max(0.0, e['glow'])
+    e['brightness'] = max(0.0, min(1.0, e['brightness']))
+    e['spacing'] = max(0.0, e['spacing'])
+    e['seed'] = max(1, e['seed'])
+    if e['size'] not in AURORA_SIZES:
+        e['size'] = min(AURORA_SIZES, key=lambda s: abs(s - e['size']))
+    return e
+
+
+def has_aurora(P):
+    e = (P.get('aurora') or {})
+    return bool(e.get('enabled')) and bool(e.get('north', True) or e.get('south', True))
+
+
+class AuroraNoise:
+    N = 64
+
+    def __init__(self, seed):
+        rng = np.random.default_rng(4116 + int(seed))
+        self.tabs = [rng.random((self.N, self.N, self.N), dtype=np.float32) for _ in range(8)]
+
+    def vn(self, x, y, z, t):
+        T = self.tabs[t]; N = self.N
+        xi = np.floor(x).astype(np.int32); yi = np.floor(y).astype(np.int32); zi = np.floor(z).astype(np.int32)
+        fx = (x - xi).astype(np.float32); fy = (y - yi).astype(np.float32); fz = (z - zi).astype(np.float32)
+        fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz)
+        x0 = xi % N; y0 = yi % N; z0 = zi % N; x1 = (x0 + 1) % N; y1 = (y0 + 1) % N; z1 = (z0 + 1) % N
+        c00 = T[x0, y0, z0] * (1 - fx) + T[x1, y0, z0] * fx
+        c10 = T[x0, y1, z0] * (1 - fx) + T[x1, y1, z0] * fx
+        c01 = T[x0, y0, z1] * (1 - fx) + T[x1, y0, z1] * fx
+        c11 = T[x0, y1, z1] * (1 - fx) + T[x1, y1, z1] * fx
+        return (c00 * (1 - fy) + c10 * fy) * (1 - fz) + (c01 * (1 - fy) + c11 * fy) * fz
+
+    def fbm(self, x, y, z, t, o=4):
+        s = 0; a = 1.0; n = 0.0
+        for i in range(o):
+            s = s + a * self.vn(x * 2 ** i + 17.3 * i, y * 2 ** i + 5.1 * i, z * 2 ** i + 9.7 * i, (t + i) % 8)
+            n += a; a *= 0.5
+        return (s / n) * 2 - 1
+
+
+def aurora_ss(a, b, x):
+    t = np.clip((x - a) / (b - a), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def aurora_axis(e, sgn):
+    key = 'north' if sgn > 0 else 'south'
+    t = np.radians(e[key + '_tilt']); l = np.radians(e[key + '_lon'])
+    return np.array([np.sin(t) * np.cos(l), np.sin(t) * np.sin(l), np.cos(t)]) * sgn
+
+
+def aurora_reach(e):
+    offs = [c[0] for c in AURORA_CURTAINS[:e['curtains']]]
+    th = e['oval'] + e['wobble'] + 3.0 + 3.6 + 1.1 + max(offs) * e['spread'] + 4 * e['width'] * 1.6 + 8.0
+    return th + max(e['north_tilt'], e['south_tilt'])
+
+
+def aurora_hemi(e, nz, px, py, pz, sgn):
+    m = aurora_axis(e, sgn)
+    e1 = np.cross(m, [0.3, 0.9, 0.1]); e1 /= np.linalg.norm(e1); e2 = np.cross(m, e1)
+    cm = px * m[0] + py * m[1] + pz * m[2]
+    th = np.degrees(np.arccos(np.clip(cm, -1, 1))).astype(np.float32)
+    cx = px * e1[0] + py * e1[1] + pz * e1[2]; cy = px * e2[0] + py * e2[1] + pz * e2[2]
+    r = np.sqrt(cx * cx + cy * cy) + 1e-6; cx = (cx / r).astype(np.float32); cy = (cy / r).astype(np.float32)
+    s = float((3 if sgn > 0 else 71) + 13 * (e['seed'] - 1))
+    fb = nz.fbm
+    th0 = e['oval'] + e['wobble'] * fb(cx * 1.3 + s, cy * 1.3, s * 0.7, 0, 3) + 3.0 * cx
+    thw = th + 3.6 * fb(px * 5 + s, py * 5, pz * 5, 1, 4) + 1.1 * fb(px * 13, py * 13 + s, pz * 13, 2, 3)
+    rays = 0.5 + 0.5 * fb(cx * 16 + s, cy * 16, th * 0.05, 3, 2)
+    rays = (1 - e['rays']) + e['rays'] * aurora_ss(0.25, 0.8, rays)
+    rays = rays * (0.75 + 0.25 * (0.5 + 0.5 * fb(cx * 38, cy * 38 + s, th * 0.08, 4, 2)))
+    I = np.zeros_like(th); Cv = np.zeros_like(th)
+    gd = (e['patchy'] - 0.5) * 0.5
+    for k, (off, g0, g1, amp) in enumerate(AURORA_CURTAINS[:e['curtains']]):
+        thk = th0 + off * e['spread'] + 2.4 * fb(cx * 2.6 + k * 7.1 + s, cy * 2.6, k * 3.3, 5, 3)
+        w = e['width'] * (1 + 0.6 * fb(cx * 3.1 + s, cy * 3.1 + k * 2.2, 1.7, 6, 2))
+        gate = aurora_ss(g0 + gd, g1 + gd, 0.5 + 0.5 * fb(cx * 1.9 + k * 11.3, cy * 1.9 + s, k * 1.9, 7, 3))
+        d = thw - thk
+        prof = np.where(d > 0, np.exp(-(d / w) ** 2), np.exp(-(np.abs(d) / (1.7 * w)) ** 1.6))
+        a = amp * gate * prof
+        I += a; Cv += a * np.clip(-d / (2.6 * w), 0, 1)
+    patch = 0.5 + 0.5 * fb(px * 3 + s, py * 3, pz * 3, 2, 3)
+    I = I * rays + e['glow'] * np.exp(-((thw - th0 - 1) / 8) ** 2) * aurora_ss(0.3, 0.7, patch)
+    if e['polar_gap'] > 0:
+        I = I * aurora_ss(e['polar_gap'] / 3.0, e['polar_gap'], th)
+    v = Cv / np.maximum(I, 1e-4)
+    return I.astype(np.float32), np.clip(v, 0, 1).astype(np.float32)
+
+
+def aurora_maps(P, W=None, cancel=None):
+    e = aurora_entry(P.get('aurora'))
+    W = int(W or e['size']); H = W // 2
+    nz = AuroraNoise(e['seed'])
+    low = np.zeros((H, W, 4), np.float32); top = np.zeros((H, W, 4), np.float32)
+    cl = [np.array(e[k], np.float32) / 255 for k in AURORA_COLOURS]
+    low[..., :3] = cl[0]; top[..., :3] = cl[3]
+    reach = min(90.0, aurora_reach(e))
+    lon = ((np.arange(W) + 0.5) / W * 2 * np.pi).astype(np.float32)
+    CH = max(8, min(256, (1 << 21) // W))
+    for sgn, on in ((1, e['north']), (-1, e['south'])):
+        if not on:
+            continue
+        rows = np.arange(0, H // 2) if sgn > 0 else np.arange(H // 2, H)
+        lat_all = (np.pi / 2 - (rows + 0.5) / H * np.pi).astype(np.float32)
+        keep = rows[np.abs(np.degrees(lat_all)) >= 90.0 - reach]
+        for c0 in range(0, len(keep), CH):
+            if cancel:
+                cancel()
+            rr = keep[c0:c0 + CH]
+            lat = (np.pi / 2 - (rr + 0.5) / H * np.pi).astype(np.float32)
+            la, lo = np.meshgrid(lat, lon, indexing='ij')
+            px = np.cos(la) * np.cos(lo); py = np.cos(la) * np.sin(lo); pz = np.sin(la)
+            I, v = aurora_hemi(e, nz, px, py, pz, sgn)
+            a0 = (np.clip(I, 0, 1.25) / 1.25) ** 0.85 * (1 - 0.2 * aurora_ss(0.2, 1.0, v))
+            core = aurora_ss(0.55, 1.0, 0.9 * a0)[..., None] * 0.45
+            vv = aurora_ss(0.05, 1.0, v)[..., None] * 0.85
+            a = np.clip(e['brightness'] * a0, 0, 1)
+            for out, (g, pu, cy) in ((low, cl[0:3]), (top, cl[3:6])):
+                col = g * (1 - vv) + pu * vv
+                out[rr, :, :3] = col * (1 - core) + cy * core
+                out[rr, :, 3] = a
+    return low, top
+
+
+def aurora_u8(m):
+    return (np.clip(m, 0, 1) * 255 + 0.5).astype(np.uint8)
+
+
+def aurora_layers(e):
+    n = e['layers']
+    out = []
+    for i in range(n):
+        f = i / float(n - 1) if n > 1 else 0.0
+        alt = e['altitude'] + e['spacing'] * i
+        a = int(round(e['opacity'] * (1 - (1 - e['fade']) * f)))
+        out.append((i, alt, a, i >= n - e['top_layers']))
+    return out
+
+
+def aurora_cfg(P, name, tex_low, tex_top):
+    e = aurora_entry(P.get('aurora'))
+    t = '\t'
+    def g(v):
+        return ('%.6g' % v)
+    L = ['EVE_CLOUDS', '{']
+    for i, alt, a, is_top in aurora_layers(e):
+        lo = alt - 500; hi = alt + 500
+        L += [t + 'OBJECT', t + '{',
+              t * 2 + 'name = %s-aurora-%d' % (name, i),
+              t * 2 + 'body = ' + name,
+              t * 2 + 'altitude = ' + g(alt),
+              t * 2 + 'detailSpeed = 0,25,0',
+              t * 2 + 'speed = 0,%s,0' % g(e['speed']),
+              t * 2 + 'speedMode = LinearSurface',
+              t * 2 + 'settings', t * 2 + '{',
+              t * 3 + '_UVNoiseTex = ' + AURORA_UVNOISE,
+              t * 3 + '_UVNoiseStrength = 0.0012',
+              t * 3 + '_Color = 255,255,255,%d' % a,
+              t * 3 + '_MainTex', t * 3 + '{',
+              t * 4 + 'value = ' + (tex_top if is_top else tex_low),
+              t * 4 + 'isClamped = True',
+              t * 3 + '}', t * 2 + '}',
+              t * 2 + 'layer2D', t * 2 + '{',
+              t * 3 + 'macroCloudMaterial', t * 3 + '{',
+              t * 4 + '_DetailDist = 2E-06',
+              t * 4 + '_MinLight = 1',
+              t * 3 + '}', t * 2 + '}',
+              t * 2 + 'layerRaymarchedVolumeV5', t * 2 + '{',
+              t * 3 + 'scaledFadeStartAltitude = -2000',
+              t * 3 + 'scaledFadeEndAltitude = -1000',
+              t * 3 + 'coverageMap', t * 3 + '{',
+              t * 4 + 'value = ' + AURORA_COVERAGE,
+              t * 4 + 'type = AlphaMap',
+              t * 4 + 'alphaMask = ALPHAMAP_R',
+              t * 3 + '}',
+              t * 3 + 'raymarchingSettings', t * 3 + '{',
+              t * 4 + 'adaptiveStepSizeFactor = 0',
+              t * 4 + 'baseStepSize = 90000000',
+              t * 4 + 'maxStepSize = 90000000',
+              t * 4 + 'lightMarchDistance = 0',
+              t * 4 + 'lightMarchSteps = 0',
+              t * 4 + 'fxOnlyLayer = True',
+              t * 3 + '}',
+              t * 3 + 'cloudTypes', t * 3 + '{',
+              t * 4 + 'Item', t * 4 + '{',
+              t * 5 + 'typeName = AuroraEmpty',
+              t * 5 + 'minAltitude = ' + g(lo),
+              t * 5 + 'maxAltitude = ' + g(hi),
+              t * 5 + 'interpolateCloudHeights = false',
+              t * 5 + 'baseNoiseTiling = 0',
+              t * 5 + 'density = 0.0',
+              t * 5 + 'lightningFrequency = 0.0',
+              t * 5 + 'coverageCurve', t * 5 + '{', t * 6 + 'key = 0 0', t * 5 + '}',
+              t * 5 + 'densityCurve', t * 5 + '{', t * 5 + '}',
+              t * 4 + '}', t * 3 + '}',
+              t * 3 + 'noise', t * 3 + '{', t * 3 + '}',
+              t * 3 + 'lightVolumeSettings', t * 3 + '{', t * 4 + 'useLightVolume = False', t * 3 + '}',
+              t * 3 + 'phaseFunctions', t * 3 + '{', t * 3 + '}',
+              t * 2 + '}', t + '}']
+    L.append('}')
+    return '\n'.join(L) + '\n'
+
+
+def aurora_composite(e, low, top, bg):
+    o = bg.astype(np.float32)
+    al = low[..., 3:4]; at = top[..., 3:4]
+    nl = max(1, e['layers'] - e['top_layers']); nt = e['top_layers']
+    ol = 1 - (1 - min(1.0, e['opacity'] / 255.0)) ** min(nl, 3)
+    ot = (1 - (1 - min(1.0, e['opacity'] * (0.5 + 0.5 * e['fade']) / 255.0)) ** min(nt, 3)) * 0.6 if nt else 0.0
+    o = o * (1 - al * ol) + low[..., :3] * al * ol
+    o = o * (1 - at * ot) + top[..., :3] * at * ot
+    return o
+
+
+def aurora_preview(P, low, top, bg=None, S=420):
+    e = aurora_entry(P.get('aurora'))
+    H, W = low.shape[:2]
+    offs = [c[0] for c in AURORA_CURTAINS[:e['curtains']]]
+    reach = min(89.0, e['oval'] + e['wobble'] + max(offs) * e['spread'] + 3 * e['width'] + max(e['north_tilt'], e['south_tilt']) + 6)
+    yy, xx = np.mgrid[0:S, 0:S]
+    X = (xx - S / 2 + 0.5) / (S / 2); Y = (yy - S / 2 + 0.5) / (S / 2); R = np.sqrt(X * X + Y * Y)
+    if bg is not None:
+        bgf = np.asarray(Image.fromarray(np.asarray(bg, np.uint8)).resize((W, H), Image.BILINEAR), np.float32) / 255 * 0.08
+    else:
+        bgf = np.zeros((H, W, 3), np.float32) + np.array([0.02, 0.03, 0.06], np.float32)
+    panels = []
+    for sgn in (1, -1):
+        col = np.radians(R * reach)
+        lo = (np.arctan2(Y, X) * sgn) % (2 * np.pi)
+        fy = (col / np.pi if sgn > 0 else 1 - col / np.pi) * H
+        py_ = np.clip(fy, 0, H - 1).astype(int); px_ = np.clip(lo / (2 * np.pi) * W, 0, W - 1).astype(int)
+        o = aurora_composite(e, low[py_, px_], top[py_, px_], bgf[py_, px_])
+        edge = np.clip((1 - R) * S / 2, 0, 1)[..., None]
+        o = o * edge + np.array([13, 15, 20], np.float32) / 255 * (1 - edge)
+        panels.append(o)
+    gap = np.zeros((S, 24, 3), np.float32) + np.array([13, 15, 20], np.float32) / 255
+    pv = np.concatenate([panels[0], gap, panels[1]], 1)
+    return Image.fromarray(aurora_u8(pv))
+
+
+def save_aurora(m, path, fmt, flip=True):
+    u = aurora_u8(m)
+    if path.lower().endswith('.dds'):
+        if flip:
+            u = np.ascontiguousarray(u[::-1])
+        save_mips(Image.fromarray(u, 'RGBA'), path, 'DXT5')
+    else:
+        Image.fromarray(u, 'RGBA').save(path, 'PNG')
+
+def gamedata_rel(d):
+    d = os.path.abspath(d)
+    parts = d.split(os.sep)
+    low = [p.lower() for p in parts]
+    if 'gamedata' in low:
+        i = len(low) - 1 - low[::-1].index('gamedata')
+        rest = parts[i + 1:]
+        if rest:
+            return '/'.join(rest)
+    return ''
+
+
+def default_cfg_path(folder):
+    rel = gamedata_rel(folder) if folder else ''
+    if not rel:
+        td = texture_dir()
+        rel = gamedata_rel(td) if td else ''
+    return rel or 'MyMod/Textures'
+
+
+def tex_path(folder, fname, base=None):
+    rel = default_cfg_path(folder) if base is None else base.strip().replace('\\', '/').strip('/')
+    return (rel + '/' if rel else '') + fname
 
 
 def export_target(folder, base, fmt):
@@ -2098,16 +2492,41 @@ def planets_file(folder, name):
     return os.path.join(folder, 'planetsList_%s.cfg' % name)
 
 
+def aurora_files(folder, base, fmt):
+    ext = FMT_EXT[fmt]
+    return (os.path.join(folder, base + ext), os.path.join(folder, base + '_top' + ext), os.path.join(folder, base + '.cfg'))
+
+
+def export_aurora(P, name, base, fmt, folder, flip=True, log=print, cfg_path=None, cancel=None):
+    lp, tp, cp = aurora_files(folder, base, fmt)
+    log('making the aurora at %d x %d' % (aurora_entry(P.get('aurora'))['size'], aurora_entry(P.get('aurora'))['size'] // 2))
+    low, top = aurora_maps(P, cancel=cancel)
+    save_aurora(low, lp, fmt, flip)
+    save_aurora(top, tp, fmt, flip)
+    del low, top
+    with open(cp, 'w', newline='\n') as f:
+        f.write(aurora_cfg(P, name, tex_path(folder, base, cfg_path), tex_path(folder, base + '_top', cfg_path)))
+    return [lp, tp, cp]
+
+
 def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print):
     os.makedirs(folder, exist_ok=True)
     c = None
-    if any(k not in ('atmo', 'preview', 'ring') for k, _, _ in jobs):
+    if any(k not in ('atmo', 'preview', 'ring', 'aurora') for k, _, _ in jobs):
         c = np.asarray(Image.open(os.path.join(src_dir, name + '_color.png')).convert('RGB'))
         if size and size != c.shape[1]:
             c = np.asarray(Image.fromarray(c).resize((size, size // 2), Image.LANCZOS))
     written = []
     for kind, base, fmt in jobs:
         path = export_target(folder, base, fmt)
+        if kind == 'aurora':
+            if not has_aurora(P):
+                log('no aurora on this planet - skipped')
+                continue
+            for w in export_aurora(P, name, base, fmt, folder, flip, log):
+                written.append(w)
+                log('exported ' + w)
+            continue
         if kind == 'atmo':
             if not has_atmo(P):
                 log('no atmosphere on this planet - skipped')
@@ -2689,12 +3108,15 @@ def cmd_export(a):
             'emissive': {'dds': DDS_BC1, 'bc1': DDS_BC1, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
             'preview': {'png': 'PNG', 'jpg': 'JPG'},
             'ring': {'dds': DDS_BC3, 'bc3': DDS_BC3, 'bc7': DDS_BC7, 'png': 'PNG'},
-            'atmo': {'cfg': 'Scatterer cfg'}}
+            'atmo': {'cfg': 'Scatterer cfg'},
+            'aurora': {'dds': DDS_BC3, 'png': 'PNG'}}
     jobs = []
-    for kind in ('color', 'normal', 'flow', 'emissive', 'preview', 'ring', 'atmo'):
+    for kind in ('color', 'normal', 'flow', 'emissive', 'preview', 'ring', 'atmo', 'aurora'):
         f = getattr(a, kind)
         if f and f != 'none':
             if kind == 'atmo' and not has_atmo(P):
+                continue
+            if kind == 'aurora' and not has_aurora(P):
                 continue
             jobs.append((kind, '%s_%s' % (name, kind), pick[kind][f]))
     export_maps(src, name, P, jobs, a.to, a.size or None, not a.no_flip)
@@ -2802,6 +3224,7 @@ def main():
     e.add_argument('--preview', default='none', choices=['png', 'jpg', 'none'])
     e.add_argument('--ring', default='dds', choices=['dds', 'bc3', 'bc7', 'png', 'none'])
     e.add_argument('--atmo', default='cfg', choices=['cfg', 'none'])
+    e.add_argument('--aurora', default='dds', choices=['dds', 'png', 'none'])
     e.add_argument('--size', type=int, default=0); e.add_argument('--no-flip', action='store_true')
     a = ap.parse_args()
     r = {'make': cmd_make, 'install': cmd_install, 'sample': cmd_sample, 'new': cmd_new, 'flow': cmd_flow, 'export': cmd_export}[a.cmd](a)

@@ -121,6 +121,7 @@ def band_image(P, w, h):
         r, th = gg.storm_polar(s, np.radians(LA).astype(np.float32), np.radians(LO).astype(np.float32), P.get('seed', 1), k)
         wgt, arm = gg.storm_marks(s, r, th, P.get('seed', 1), k)
         if arm is not None:
+            arm = gg.arm_cover(arm)
             img = img * (1 - arm[..., None]) + np.array(s.get('arm_color') or s['core_color'], float) * arm[..., None]
         img = img * (1 - wgt[..., None]) + np.array(s['core_color'], float) * wgt[..., None]
     return Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
@@ -1229,7 +1230,7 @@ class SampleWin(tk.Toplevel):
 
 
 class ExportDialog(tk.Toplevel):
-    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'), ('atmo', 'Scatterer config'), ('preview', 'Preview sheet'))
+    KINDS = (('color', 'Colour map'), ('normal', 'Normal map'), ('flow', 'Flow map'), ('emissive', 'Emissive map'), ('ring', 'Ring texture'), ('atmo', 'Scatterer config'), ('aurora', 'Aurora (EVE)'), ('preview', 'Preview sheet'))
     SIZES = ['Same as build', '16384 \u00d7 8192', '8192 \u00d7 4096', '4096 \u00d7 2048', '2048 \u00d7 1024', '1024 \u00d7 512']
 
     def __init__(self, app, builds):
@@ -1262,13 +1263,13 @@ class ExportDialog(tk.Toplevel):
         ttk.Label(f, text='File name', style='Dim.TLabel').grid(row=3, column=1, sticky='w', pady=(12, 2))
         ttk.Label(f, text='Format', style='Dim.TLabel').grid(row=3, column=2, sticky='w', pady=(12, 2))
         self.rows = {}
-        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'ring': True, 'atmo': True, 'preview': False}
+        defaults = {'color': True, 'normal': True, 'flow': True, 'emissive': True, 'ring': True, 'atmo': True, 'aurora': True, 'preview': False}
         for i, (k, lab) in enumerate(self.KINDS):
             on = tk.BooleanVar(value=self.S.get('on_' + k, defaults[k]))
             chk = ttk.Checkbutton(f, text=lab, variable=on)
             chk.grid(row=4 + i, column=0, sticky='w', pady=3)
             fn = self.P['files'].get(k) or ''
-            base = os.path.splitext(os.path.basename(fn))[0] if fn and k != 'atmo' else '%s_%s' % (self.name, k)
+            base = os.path.splitext(os.path.basename(fn))[0] if fn and k not in ('atmo', 'aurora') else '%s_%s' % (self.name, k)
             v_name = tk.StringVar(value=base)
             ttk.Entry(f, textvariable=v_name, width=30).grid(row=4 + i, column=1, sticky='w', pady=3)
             v_fmt = tk.StringVar(value=self.S.get('fmt_' + k) if self.S.get('fmt_' + k) in gg.EXPORT_FORMATS[k] else gg.EXPORT_FORMATS[k][0])
@@ -1286,7 +1287,9 @@ class ExportDialog(tk.Toplevel):
         ttk.Label(f, text='Which DDS?  Colour and emissive maps: BC1 / DXT1 is what KSP uses by default, BC7 looks '
                           'best but the file is twice as big, BC3 / DXT5 if you need an alpha channel.  Normal map: '
                           'DXT5nm for KSP\u2019s own planet shaders, BC5 for shaders that ask for it.  BC5 and BC7 '
-                          'need a texture loader that reads them, such as KSPTextureLoader.',
+                          'need a texture loader that reads them, such as KSPTextureLoader.  Aurora: two textures '
+                          '(<name> and <name>_top) plus an EVE config (<name>.cfg) with the layers; its size is set on '
+                          'the Aurora tab.',
                   style='Dim.TLabel', wraplength=640, justify='left').grid(row=nk + 2, column=0, columnspan=4, sticky='w', pady=(8, 0))
         self.stat = ttk.Label(f, text='', style='Dim.TLabel', wraplength=640, justify='left')
         self.stat.grid(row=nk + 3, column=0, columnspan=4, sticky='w', pady=(10, 0))
@@ -1319,6 +1322,7 @@ class ExportDialog(tk.Toplevel):
                'emissive': os.path.isfile(os.path.join(src, self.name + '_emissive.png')),
                'ring': os.path.isfile(os.path.join(src, self.name + '_ring.png')),
                'atmo': gg.has_atmo(self.P),
+               'aurora': gg.has_aurora(self.P),
                'preview': os.path.isfile(os.path.join(src, self.name + '_preview.png'))}
         for k, (on, chk, v_name, v_fmt, note) in self.rows.items():
             if has[k]:
@@ -1327,7 +1331,7 @@ class ExportDialog(tk.Toplevel):
             else:
                 on.set(False)
                 chk.state(['disabled'])
-                note.configure(text='no atmosphere' if k == 'atmo' else 'not in this build')
+                note.configure(text={'atmo': 'no atmosphere', 'aurora': 'no aurora'}.get(k, 'not in this build'))
         st = self.app.is_stale(self.res())
         self.stat.configure(text='Note: the settings changed after this build \u2013 the export shows the build, not the new settings.' if st else '')
 
@@ -1355,6 +1359,9 @@ class ExportDialog(tk.Toplevel):
         targets = [gg.export_target(folder, b, fm) for _, b, fm in jobs]
         if any(k == 'atmo' for k, _, _ in jobs):
             targets.append(gg.planets_file(folder, self.name))
+        for k, b, fm in jobs:
+            if k == 'aurora':
+                targets += list(gg.aurora_files(folder, b, fm))
         exist = [t for t in targets if os.path.exists(t)]
         if exist and not messagebox.askyesno('Replace files?', 'These files already exist and will be replaced:\n\n' + '\n'.join(os.path.basename(x) for x in exist), parent=self):
             return
@@ -1892,6 +1899,7 @@ class App(tk.Tk):
         self.preset_file = None
         self.dirty = False
         self.sliders, self.editors, self.swatches = [], [], []
+        self.checks, self.combos = [], []
         self.proc = None
         self.q = queue.Queue()
         self.view_src = None
@@ -1933,6 +1941,15 @@ class App(tk.Tk):
         self.atmo_err = None
         self.atmo_texc = {}
         self.adrag = None
+        self.ig_cache = {}
+        self.aur_lock = threading.Lock()
+        self.aur_q = queue.Queue()
+        self.aur_gen = 0
+        self.aur_req = None
+        self.aur_thread = None
+        self.aur_img = None
+        self.aur_key = None
+        self.aur_err = None
         self.build_ui()
         self.after(150, self.live_poll)
         self.bind('<Control-z>', self.undo)
@@ -1993,18 +2010,15 @@ class App(tk.Tk):
         self.tab_poles()
         self.tab_rings()
         self.tab_atmo()
+        self.tab_aurora()
         self.tab_body()
         vb = ttk.Frame(right)
         vb.pack(fill='x')
-        for val, txt in (('bands', 'Live preview'), ('atmo', 'In game'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
-            ttk.Radiobutton(vb, text=txt, value=val, variable=self.view, style='Toolbutton',
-                            command=self.update_view).pack(side='left', padx=(0, 4))
-        ttk.Checkbutton(vb, text='Swirls', variable=self.live_on, command=self.toggle_live).pack(side='left', padx=(10, 4))
-        lcb = ttk.Combobox(vb, textvariable=self.live_size, values=LIVE_RES, width=5, state='readonly')
-        lcb.pack(side='left', padx=(0, 8))
-        lcb.bind('<<ComboboxSelected>>', self.live_size_changed)
         self.export_btn = ttk.Button(vb, text='Export…', command=self.export)
         self.export_btn.pack(side='right')
+        for val, txt in (('bands', 'Live preview'), ('atmo', 'In game'), ('aurora', 'Aurora'), ('preview', 'Preview sheet'), ('flat', 'Flat map')):
+            ttk.Radiobutton(vb, text=txt, value=val, variable=self.view, style='Toolbutton',
+                            command=self.update_view).pack(side='left', padx=(0, 4))
         tb = ttk.Frame(right)
         tb.pack(fill='x', pady=(6, 0))
         ttk.Label(tb, text='On the map', style='Dim.TLabel').pack(side='left', padx=(0, 8))
@@ -2030,6 +2044,10 @@ class App(tk.Tk):
         self.build_btn.pack(side='left')
         self.cancel_btn = ttk.Button(sb, text='Cancel', command=self.cancel, state='disabled')
         self.cancel_btn.pack(side='left', padx=6)
+        lcb = ttk.Combobox(sb, textvariable=self.live_size, values=LIVE_RES, width=5, state='readonly')
+        lcb.pack(side='right', padx=(4, 0))
+        lcb.bind('<<ComboboxSelected>>', self.live_size_changed)
+        ttk.Checkbutton(sb, text='Live swirls', variable=self.live_on, command=self.toggle_live).pack(side='right', padx=(10, 0))
         self.prog = ttk.Progressbar(sb, mode='determinate', maximum=100)
         self.prog.pack(side='left', fill='x', expand=True, padx=(6, 0))
         self.res_info = ttk.Label(right, text='', style='Dim.TLabel', wraplength=820, justify='left')
@@ -2513,6 +2531,261 @@ class App(tk.Tk):
             ttk.Button(fr, text='\u21ba', width=2, style='Small.TButton', command=reset).pack(side='left', padx=(4, 0))
         return fr
 
+    def note(self, parent, text):
+        ttk.Label(parent, text=text, style='Dim.TLabel', wraplength=540, justify='left').pack(anchor='w')
+
+    def check(self, parent, text, path):
+        v = tk.BooleanVar()
+
+        def flip():
+            self.snapshot()
+            setp(self.P, path, bool(v.get()))
+            self.changed()
+        cb = ttk.Checkbutton(parent, text=text, variable=v, command=flip)
+        self.checks.append((v, path))
+        return cb
+
+    def swatch_row(self, parent, items):
+        r = ttk.Frame(parent)
+        r.pack(fill='x', pady=(6, 0))
+        for i, (lab, path) in enumerate(items):
+            ttk.Label(r, text=lab).pack(side='left', padx=(8 if i == 0 else 22, 10))
+            Swatch(self, r, path).lab.pack(side='left')
+        return r
+
+    def combo(self, parent, row, label, path, options):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=(8, 8), pady=(4, 0))
+        var = tk.StringVar()
+        names = [n for _, n in options]
+        cb = ttk.Combobox(parent, textvariable=var, values=names, width=16, state='readonly')
+        cb.grid(row=row, column=1, sticky='w', pady=(4, 0))
+
+        def sel(_e=None):
+            v = dict((n, k) for k, n in options).get(var.get())
+            if v is not None and v != getp(self.P, path):
+                self.snapshot()
+                setp(self.P, path, v)
+                self.changed()
+        cb.bind('<<ComboboxSelected>>', sel)
+        self.combos.append((var, path, dict(options)))
+
+    AURORA_SIZE_NAMES = (('1024', '1024 × 512'), ('2048', '2048 × 1024'), ('4096', '4096 × 2048'), ('8192', '8192 × 4096'))
+
+    def tab_aurora(self):
+        sf = ScrollFrame(self.nb)
+        self.nb.add(sf, text='Aurora')
+        p = sf.inner
+        A = ('aurora',)
+        top = ttk.Frame(p)
+        top.pack(fill='x', pady=(2, 0))
+        self.aur_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='Aurora (EVE cloud layers)', variable=self.aur_on, command=self.aurora_toggle).pack(side='left')
+        ttk.Button(top, text='Aurora view', command=self.aurora_show).pack(side='right')
+        self.note(p, 'Polar lights around the magnetic poles, made of glowing curtains with rays. Export writes two '
+                     'textures (the lower, main colour and the top fringe) and an EVE config that stacks them as '
+                     'several thin layers, so the aurora has height and depth. Needs EVE and StockVolumetricClouds. '
+                     'The Aurora view shows both poles seen from above.')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Seed', A + ('seed',), 1, 999, 1, isint=True, tip='a different pattern of curtains with the same settings')
+        self.section(p, 'Where')
+        r = ttk.Frame(p)
+        r.pack(fill='x')
+        self.check(r, 'North pole', A + ('north',)).pack(side='left', padx=(8, 16))
+        self.check(r, 'South pole', A + ('south',)).pack(side='left')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'North magnetic tilt (°)', A + ('north_tilt',), 0, 40, 0.5,
+               tip='how far the magnetic pole sits from the north pole')
+        Slider(self, g, 2, 'North tilt towards (lon °)', A + ('north_lon',), 0, 360, 1)
+        Slider(self, g, 3, 'South magnetic tilt (°)', A + ('south_tilt',), 0, 40, 0.5)
+        Slider(self, g, 4, 'South tilt towards (lon °)', A + ('south_lon',), 0, 360, 1)
+        Slider(self, g, 5, 'Oval size (°)', A + ('oval',), 3, 45, 0.5,
+               tip='distance of the main curtain from the magnetic pole (Earth: about 20°)')
+        Slider(self, g, 7, 'Wobble (°)', A + ('wobble',), 0, 15, 0.1, tip='how far the oval bends in and out')
+        Slider(self, g, 9, 'Dark centre (°)', A + ('polar_gap',), 0, 30, 0.5,
+               tip='0 = off; keeps the area right around the magnetic pole free of glow')
+        self.section(p, 'Curtains')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Curtains', A + ('curtains',), 1, len(gg.AURORA_CURTAINS), 1, isint=True,
+               tip='parallel arcs, the first is the brightest')
+        Slider(self, g, 2, 'Spacing', A + ('spread',), 0.2, 3, 0.05, tip='how far apart the curtains are')
+        Slider(self, g, 4, 'Width (°)', A + ('width',), 0.3, 6, 0.05)
+        Slider(self, g, 5, 'Gaps', A + ('patchy',), 0, 1, 0.01, tip='0 = unbroken arcs, 1 = short broken pieces')
+        Slider(self, g, 7, 'Rays', A + ('rays',), 0, 1, 0.01, tip='the vertical streaks in the curtains')
+        Slider(self, g, 9, 'Diffuse glow', A + ('glow',), 0, 0.6, 0.01, tip='a soft haze along the oval')
+        Slider(self, g, 11, 'Brightness', A + ('brightness',), 0.1, 1, 0.01)
+        self.section(p, 'Colours')
+        self.note(p, 'Main = the curtain, edge = its lower fringe, core = the brightest parts. The top layers are '
+                     'the high part of the aurora (red and purple on Earth).')
+        self.swatch_row(p, [('Main', A + ('color',)), ('Edge', A + ('edge_color',)), ('Core', A + ('core_color',))])
+        self.swatch_row(p, [('Top', A + ('top_color',)), ('Top edge', A + ('top_edge_color',)), ('Top core', A + ('top_core_color',))])
+        self.section(p, 'In game')
+        g = self.grid_box(p)
+        Slider(self, g, 0, 'Layers', A + ('layers',), 1, 16, 1, isint=True, tip='more layers = more depth from the side')
+        Slider(self, g, 2, 'Top layers', A + ('top_layers',), 0, 16, 1, isint=True, tip='how many of the highest layers use the top colours')
+        Slider(self, g, 4, 'Lowest layer (m)', A + ('altitude',), 1000, 200000, 500)
+        Slider(self, g, 5, 'Layer spacing (m)', A + ('spacing',), 0, 20000, 100)
+        Slider(self, g, 6, 'Opacity', A + ('opacity',), 0, 255, 1, isint=True, tip='alpha of the lowest layer (_Color)')
+        Slider(self, g, 8, 'Highest layer opacity', A + ('fade',), 0, 1, 0.01, tip='as a part of the lowest layer’s opacity')
+        Slider(self, g, 10, 'Drift speed', A + ('speed',), -60, 60, 0.5, tip='EVE speed, how fast the aurora drifts around the pole')
+        self.combo(g, 12, 'Texture size', A + ('size',), [(int(k), n) for k, n in self.AURORA_SIZE_NAMES])
+        self.section(p, 'EVE config')
+        self.note(p, 'Goes into a .cfg anywhere in your mod (for example Configs/…/Clouds/). Export writes it with the '
+                     'right texture paths; the paths here use “Path in config” from the last export.')
+        self.aur_cfg = tk.Text(p, height=14, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
+        self.aur_cfg.pack(anchor='w', pady=(4, 0))
+        ttk.Button(p, text='Copy', command=self.aurora_copy).pack(anchor='w', pady=(6, 12))
+        self.swatches.append(type('A', (), {'refresh': lambda s=None: self.aurora_refresh()})())
+
+    def aurora_e(self):
+        return self.P['aurora']
+
+    def aurora_refresh(self):
+        self.aur_on.set(bool(self.aurora_e().get('enabled')))
+        self.aurora_text()
+
+    def aurora_tex_names(self):
+        S = load_settings()
+        n = self.P['name']
+        base = S.get('cfg_path') or gg.default_cfg_path(S.get('export_dir') or '')
+        return gg.tex_path('', n + '_aurora', base), gg.tex_path('', n + '_aurora_top', base)
+
+    def aurora_cfg_text(self):
+        lo, hi = self.aurora_tex_names()
+        return gg.aurora_cfg(self.P, self.P['name'], lo, hi)
+
+    def aurora_text(self):
+        self.aur_text_after = None
+        if not hasattr(self, 'aur_cfg'):
+            return
+        self.aur_cfg.configure(state='normal')
+        self.aur_cfg.delete('1.0', 'end')
+        self.aur_cfg.insert('1.0', self.aurora_cfg_text())
+        self.aur_cfg.configure(state='disabled')
+
+    def aurora_dirty(self):
+        if getattr(self, 'aur_text_after', None):
+            self.after_cancel(self.aur_text_after)
+        self.aur_text_after = self.after(300, self.aurora_text)
+
+    def aurora_copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.aurora_cfg_text())
+        self.status('EVE aurora config copied')
+
+    def aurora_toggle(self):
+        self.snapshot()
+        self.aurora_e()['enabled'] = bool(self.aur_on.get())
+        self.changed()
+        if self.aurora_e()['enabled'] and self.view.get() != 'aurora':
+            self.aurora_show()
+
+    def aurora_show(self):
+        self.view.set('aurora')
+        self.update_view()
+
+    def aurora_size(self):
+        cw, ch = max(10, self.canvas.winfo_width()), max(10, self.canvas.winfo_height())
+        return int(max(160, min(700, (cw - 40) / 2, ch - 20)))
+
+    def aurora_request(self):
+        if not gg.has_aurora(self.P):
+            return
+        S = self.aurora_size()
+        P = gg.normalize(copy.deepcopy(self.P))
+        bg, bkey = self.aurora_bg()
+        key = json.dumps([P['aurora'], S, str(bkey)], sort_keys=True, default=str)
+        if self.aur_key == key:
+            return
+        r = self.aur_req
+        if r is not None and r[1] == key:
+            return
+        self.aur_err = None
+        with self.aur_lock:
+            self.aur_gen += 1
+            self.aur_req = (self.aur_gen, key, P, bg, S)
+            if self.aur_thread is None:
+                self.aur_thread = threading.Thread(target=self.aurora_worker, daemon=True)
+                self.aur_thread.start()
+
+    def aurora_worker(self):
+        while True:
+            with self.aur_lock:
+                req = self.aur_req
+                if req is None:
+                    self.aur_thread = None
+                    return
+            gen, key, P, bg, S = req
+
+            def cancel(gen=gen):
+                r = self.aur_req
+                if r is None or r[0] != gen:
+                    raise gg.Cancelled()
+            try:
+                for W in (512, 1024 if S < 520 else 2048):
+                    t0 = time.time()
+                    low, top = gg.aurora_maps(P, W, cancel=cancel)
+                    im = gg.aurora_preview(P, low, top, bg, S)
+                    self.aur_q.put((gen, key, im, W >= 1024, time.time() - t0, None))
+            except gg.Cancelled:
+                continue
+            except Exception as ex:
+                self.aur_q.put((gen, key, None, True, 0, str(ex)))
+            with self.aur_lock:
+                if self.aur_req is not None and self.aur_req[0] == gen:
+                    self.aur_req = None
+
+    def aurora_poll(self):
+        got = False
+        try:
+            while True:
+                gen, key, im, final, dt, err = self.aur_q.get_nowait()
+                if gen != self.aur_gen:
+                    continue
+                if err:
+                    self.aur_err = err
+                else:
+                    self.aur_img = im
+                    self.aur_err = None
+                    if final:
+                        self.aur_key = key
+                got = True
+        except queue.Empty:
+            pass
+        if got and self.view.get() == 'aurora':
+            if self.aur_err:
+                self.view_src = None
+                self.status('Could not draw the aurora: %s' % self.aur_err[:120])
+            else:
+                self.view_src = self.aur_img
+            self.redraw()
+
+    def aurora_view(self):
+        if not gg.has_aurora(self.P):
+            self.view_src = None
+            if not self.proc:
+                self.status('No aurora yet – tick “Aurora” on the Aurora tab')
+        else:
+            self.aurora_request()
+            self.view_src = self.aur_img
+            if not self.proc:
+                self.status('Aurora: north pole (left) and south pole (right) seen from above, all layers together')
+        self.update_export_state()
+        self.redraw()
+
+    def aurora_bg(self):
+        L = self.live_last if self.live_on.get() else None
+        if L is not None:
+            return L['col'], (L['key'], L['W'])
+        f = os.path.join(self.out_path(), self.P['name'] + '_color.png')
+        if os.path.isfile(f):
+            try:
+                c = Image.open(f).convert('RGB')
+                c.thumbnail((1024, 512))
+                return np.asarray(c), (f, os.path.getmtime(f))
+            except Exception:
+                pass
+        return np.asarray(band_image(self.P, 512, 256)), ('bands', self.live_key())
+
     def tab_body(self):
         sf = ScrollFrame(self.nb)
         self.nb.add(sf, text='Planet')
@@ -2797,6 +3070,13 @@ class App(tk.Tk):
             ttk.Radiobutton(vr, text=txt, value=val, variable=self.atmo_view, style='Toolbutton',
                             command=self.atmo_view_changed).pack(side='left', padx=(0, 4))
         ttk.Button(vr, text='In game view', command=self.atmo_show).pack(side='right')
+        vr2 = ttk.Frame(p)
+        vr2.pack(fill='x', pady=(6, 0))
+        ttk.Label(vr2, text='In game view also shows').pack(side='left', padx=(8, 8))
+        self.ig_aurora = tk.BooleanVar(value=True)
+        self.ig_glow = tk.BooleanVar(value=True)
+        for txt, var in (('Aurora', self.ig_aurora), ('Glow', self.ig_glow)):
+            ttk.Checkbutton(vr2, text=txt, variable=var, command=self.ingame_toggles).pack(side='left', padx=(0, 10))
         g = self.grid_box(p)
         Slider(self, g, 0, 'Sun angle (\u00b0)', A + ('sun_angle',), 0, 170, 1,
                tip='only for the picture: 0 = sun behind you, 90 = from the side, 150 = from behind the planet')
@@ -3139,6 +3419,26 @@ class App(tk.Tk):
         if e['enabled'] and self.view.get() != 'atmo':
             self.atmo_show()
 
+    def ingame_toggles(self):
+        if self.view.get() == 'atmo':
+            self.update_view()
+
+    def ig_on(self, name):
+        v = getattr(self, 'ig_' + name, None)
+        return bool(v.get()) if v is not None else True
+
+    def ingame_any(self):
+        P = self.P
+        return gg.has_atmo(P) or (gg.has_aurora(P) and self.ig_on('aurora')) or (gg.has_emission(P) and self.ig_on('glow'))
+
+    def ingame_glow(self, P, cancel):
+        if not (gg.has_aurora(P) and self.ig_on('aurora')):
+            return None
+        k = json.dumps(P['aurora'], sort_keys=True)
+        if self.ig_cache.get('k') != k:
+            self.ig_cache = {'k': k, 'g': gg.ingame_glow(P, 1024, cancel=cancel)}
+        return self.ig_cache['g']
+
     def atmo_show(self):
         if self.map_tool.get() != 'turn':
             self.map_tool.set('turn')
@@ -3322,13 +3622,16 @@ class App(tk.Tk):
         return int(w * k), int(h * k)
 
     def atmo_request(self, quick_only=False):
-        if not gg.has_atmo(self.P):
+        if not self.ingame_any():
             return
         tex, em, tkey = self.atmo_texture()
+        if not self.ig_on('glow'):
+            em = None
         w, h = self.atmo_size()
         P = gg.normalize(copy.deepcopy(self.P))
         pv = P['preview']
-        key = json.dumps([P['atmosphere'], pv, self.rot, w, h, str(tkey)], sort_keys=True, default=str)
+        key = json.dumps([P['atmosphere'], pv, self.rot, w, h, str(tkey), P['aurora'] if gg.has_aurora(P) else None,
+                          self.ig_on('aurora'), self.ig_on('glow')], sort_keys=True, default=str)
         self.atmo_want = key
         if self.atmo_key == key and not quick_only:
             return
@@ -3358,9 +3661,10 @@ class App(tk.Tk):
                     raise gg.Cancelled()
             try:
                 passes = ((3, 6),) if quick_only else ((3, 6), (1, 14))
+                gl = self.ingame_glow(P, cancel)
                 for sc, steps in passes:
                     t0 = time.time()
-                    im = gg.render_atmo(P, tex, em, w=max(60, w // sc), h=max(40, h // sc), steps=steps, rot=rot, cancel=cancel)
+                    im = gg.render_ingame(P, tex, em, w=max(60, w // sc), h=max(40, h // sc), steps=steps, rot=rot, cancel=cancel, glow=gl)
                     if sc > 1:
                         im = im.resize((w, h), Image.BILINEAR)
                     self.atmo_q.put((gen, key, im, sc == 1, time.time() - t0, None))
@@ -3401,7 +3705,7 @@ class App(tk.Tk):
         self.redraw()
 
     def atmo_drag_start(self, e):
-        if self.view.get() != 'atmo' or not gg.has_atmo(self.P):
+        if self.view.get() != 'atmo' or not self.ingame_any():
             return False
         self.snapshot()
         self.adrag = (e.x, float(self.atmo_e()['sun_angle']), False)
@@ -3447,6 +3751,10 @@ class App(tk.Tk):
             e.rebuild()
         for s in self.swatches:
             s.refresh()
+        for v, path in self.checks:
+            v.set(bool(getp(self.P, path)))
+        for v, path, names in self.combos:
+            v.set(names.get(getp(self.P, path), ''))
         self.v_name.set(self.P['name'])
         self.v_seed.set(str(self.P['seed']))
         for k, v in self.v_files.items():
@@ -3488,7 +3796,9 @@ class App(tk.Tk):
             self.ring_schedule()
         if hasattr(self, 'atmo_cfg'):
             self.atmo_dirty()
-        if self.view.get() in ('bands', 'atmo'):
+        if hasattr(self, 'aur_cfg'):
+            self.aurora_dirty()
+        if self.view.get() in ('bands', 'atmo', 'aurora'):
             if self.pending:
                 self.after_cancel(self.pending)
             self.pending = self.after(180, self.update_view)
@@ -3698,8 +4008,8 @@ class App(tk.Tk):
                 built = gg.normalize(gg.merge(gg.DEFAULTS, json.load(fh)))
         except Exception:
             return None
-        a = {k: v for k, v in built.items() if k != 'atmosphere'}
-        b = {k: v for k, v in self.P.items() if k != 'atmosphere'}
+        a = {k: v for k, v in built.items() if k not in ('atmosphere', 'aurora')}
+        b = {k: v for k, v in self.P.items() if k not in ('atmosphere', 'aurora')}
         return json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True)
 
     def update_stale(self):
@@ -3712,19 +4022,25 @@ class App(tk.Tk):
     def update_view(self, from_live=False):
         self.pending = None
         v = self.view.get()
+        if v == 'aurora':
+            self.aurora_view()
+            return
         if v == 'atmo':
             skey = self.live_key()
             if not from_live:
                 self.request_live(skey)
             self.update_live_label(skey)
-            if not gg.has_atmo(self.P):
+            if not self.ingame_any():
                 self.view_src = None
-                self.status('No atmosphere yet – tick “Scatterer atmosphere” in the Atmosphere tab')
+                self.status('Nothing to show yet – tick an atmosphere or an aurora, or add glowing bands or a heat glow')
             else:
                 self.atmo_request()
                 self.view_src = self.atmo_img
                 if not self.proc:
-                    self.status('In game: the Scatterer atmosphere as in the map view · drag left or right to move the sun')
+                    bits = [t for t, on in (('atmosphere', gg.has_atmo(self.P)), ('aurora', gg.has_aurora(self.P) and self.ig_on('aurora')),
+                                            ('glow', gg.has_emission(self.P) and self.ig_on('glow'))) if on]
+                    self.status('In game: the planet as in the map view' + (' with ' + ', '.join(bits) if bits else '') +
+                                ' · drag left or right to move the sun')
             self.update_export_state()
             self.redraw()
             return
@@ -4330,6 +4646,7 @@ class App(tk.Tk):
                 self.update_live_label()
             self.ring_schedule()
         self.atmo_poll()
+        self.aurora_poll()
         try:
             self.after(120, self.live_poll)
         except tk.TclError:
@@ -4347,6 +4664,10 @@ class App(tk.Tk):
         if self.redraw_id:
             self.after_cancel(self.redraw_id)
         self.redraw_id = self.after(60, self.redraw)
+        if self.view.get() == 'aurora':
+            if getattr(self, 'aur_resize', None):
+                self.after_cancel(self.aur_resize)
+            self.aur_resize = self.after(400, self.aurora_request)
         if self.view.get() == 'atmo':
             if getattr(self, 'atmo_resize', None):
                 self.after_cancel(self.atmo_resize)
@@ -4360,7 +4681,9 @@ class App(tk.Tk):
             self.view_geom = None
             txt = 'No picture yet'
             if self.view.get() == 'atmo':
-                txt = 'Drawing the atmosphere…' if gg.has_atmo(self.P) else 'No atmosphere – tick “Scatterer atmosphere” in the Atmosphere tab'
+                txt = 'Drawing the planet as in game…' if self.ingame_any() else 'Nothing to show yet – tick an atmosphere or an aurora'
+            if self.view.get() == 'aurora':
+                txt = 'Drawing the aurora…' if gg.has_aurora(self.P) else 'No aurora – tick “Aurora” on the Aurora tab'
             self.canvas.create_text(cw // 2, ch // 2, text=txt, fill=DIM, font=(FONT, 12))
             return
         iw, ih = self.view_src.size

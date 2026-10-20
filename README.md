@@ -74,6 +74,12 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
   or close up at the day-side or sunset edge. **Load from Scatterer config...** reads an
   existing atmo.cfg, and the tab gives you the atmo.cfg and the planet list entry to paste
   or save.
+- **Aurora:** polar lights around each magnetic pole: curtains with rays, a lower fringe
+  and bright cores, plus the red and purple top part. Set the magnetic tilt, the size and
+  wobble of the oval, the number, spacing and width of the curtains, gaps, rays, glow,
+  brightness and all six colours. The **Aurora** view shows both poles from above. Export
+  writes the two textures and an EVE config that stacks them as thin layers at different
+  heights, so the aurora has depth when you see it from the side.
 - **Randomize:** every tab has its own Randomize button. **Surprise me** randomizes
   everything at once, and **Undo** (or Ctrl+Z) goes back.
 - **Live preview:** while you edit, the preview shows the real swirls by itself a moment
@@ -110,6 +116,8 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
 ![Storm chains on the map](docs/map_tools.png)
 
 ![Atmosphere](docs/atmosphere.png)
+
+![Aurora](docs/aurora.png)
 
 ![Flow Map Maker](docs/flow_maps.png)
 
@@ -275,8 +283,27 @@ planet itself, so the radius in the tab is only for the picture. The map view us
 last config point (the highest altitude), and so does the In game view. Scatterer builds
 its tables in game the first time it sees new values, which takes a few seconds.
 
-The In game view is a close match, not a copy of the game: KSP's own lighting, EVE clouds,
+The In game view also shows the aurora and the glow (switch them off on the Atmosphere tab)
+and works without an atmosphere too. It is a close match, not a copy of the game: KSP's own lighting, EVE clouds,
 godrays and the rim and shine values are not in it.
+
+### Aurora
+
+The Aurora tab makes polar lights for EVE. Export writes three files:
+
+- `<name>_aurora.dds`: the lower, main part of the aurora (DXT5 with alpha, or PNG).
+- `<name>_aurora_top.dds`: the same curtains in the top colours.
+- `<name>_aurora.cfg`: an `EVE_CLOUDS` config with one layer per height. The lowest layers
+  use the main texture and the highest ones (**Top layers**) the top texture. Each layer
+  is a little more see-through than the one below it, from **Opacity** down to
+  **Highest layer opacity**.
+
+Put the textures where the config's texture path points (the path comes from the export
+folder, or from your texture folder if you export somewhere outside GameData) and the .cfg
+anywhere in your mod. It needs EVE and StockVolumetricClouds (for the uvnoise texture
+and an empty coverage map that keeps the layers out of the volumetric clouds). The
+**Drift speed** is EVE's `speed`, so the aurora slowly turns around the pole. The tab
+also shows the config to copy.
 
 ## Presets
 
@@ -302,7 +329,7 @@ Everything the window does also works from the command line, which is handy for 
 
 ```
 python gasgiant.py make Lavender --res 1024
-python gasgiant.py export Lavender --res 1024 --to export --color bc7 --normal dds --emissive png --ring none --atmo none
+python gasgiant.py export Lavender --res 1024 --to export --color bc7 --normal dds --emissive png --ring none --atmo none --aurora dds
 python gasgiant.py new MyGiant --template NeptuneBlue
 python gasgiant.py flow MyGiant
 python gasgiant.py sample picture.jpg X1 Y1 X2 Y2 --lat 70 -70
