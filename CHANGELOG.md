@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.12
+
+- Scatterer: the planet list entry no longer writes autoMainSun, which only a modified Scatterer
+  knows. Everything the studio writes is now for the regular Scatterer release. For a planet
+  around another star, set Sun (mainSunCelestialBody) on the Atmosphere tab to that star.
+
 ## 1.1.11
 
 - In game view: now also shows the aurora (strongest on the night side) next to the glowing bands
