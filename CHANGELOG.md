@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.1.13
+
+- Flow clouds work next to the aurora: EVE skips every cloud layer without a raymarched volume
+  on a planet that has one, and the aurora layers have one, so the flow cloud layer was never
+  loaded and did not move. The cloud layer now gets the same empty raymarched volume as the
+  aurora when the planet has an aurora.
+- New Config tab: fill in the planet's name, description, what it orbits, radius, gravity, day
+  length, orbit and atmosphere, and the studio writes the configs for you. It works out the
+  mass and density, the orbital period and sphere of influence (from the parent in your mod),
+  the atmosphere's pressure and temperature curves, time warp limits, science altitudes, the
+  light, ambient, orbit and rim colours from the bands, and a biome map with biomes for the polar
+  regions (named after the hexagon or cyclones), the belts, the equatorial zone and every big
+  storm. "What gets written" shows each file before you export. The biome map is written as a DDS
+  with a 16-colour palette, Kopernicus' palette format, which keeps the exact biome colours.
+- Config tab: "Kopernicus options" lists every line of the planet config with a tick box to
+  leave it out and a field to use your own value instead of the worked-out one, plus the other
+  options from the Kopernicus wiki (barycenter, contractWeight, mass, gravParameter,
+  sphereOfInfluence, hillSphere, RnDVisibility, maxZoom, orbit mode and icon, HazardousBody,
+  Debug and more), off until you tick them, with sensible values already filled in.
+- Code boxes (Scatterer, aurora, rings, Config) scroll up again: the mouse wheel scrolls the box
+  until its top or bottom and only then the page, instead of both at once.
+- Export to mod: pick your mod's folder in GameData and it writes everything where your mod
+  keeps it: textures in Textures/PluginData (flow map in GiantFlow), the Kopernicus config in
+  Configs/<star>, the EVE cloud layer in Configs/volumetricclouds/Clouds (and adds the planet to
+  pqs.cfg), the Scatterer atmosphere in Scatterer/Planets and its entry in planetsList_<star>.cfg.
+  Rings, glow and aurora go along when the planet has them. Exporting again replaces the
+  planet's own files and entries instead of adding a second copy, other planets' entries stay
+  as they are, and every file that is already there is backed up first. Scatterer gets the
+  planet's radius, and its sun becomes the planet's star when the one set is not in the mod.
+- Flow Map Maker: for planets made here it now uses the generator's own wind instead of
+  guessing bands from the colours: every band jet in its real direction (they do not always
+  alternate), the curls along the band edges, the polar hexagon or cyclones, and the jets
+  bending around big storms. "Band-edge curls" sets how strong the curls are. Untick "Use the
+  generator's wind and storms" for the old colour-based way.
+- Flow Map Maker: all of the generator's storms, the small ones too, are put in the storm list
+  by themselves, each in its real place, size, stretch and spin. Your own swirls stay when the
+  preset changes. "Reset to the generator's storms" brings them back.
+- Flow Map Maker: opens on the newest colour map in out/, and switches to a new build when one
+  finishes. Builds are listed in the texture list next to your mod's textures.
+- Flow Map Maker: the first look at a planet shows a rough version after about 2 seconds, the sharp
+  one follows and is kept, so the next time it opens at once.
+- Flow Map Maker: a polar hexagon now only gives a jet along the hexagon's edge, the width of its
+  band. Before, the whole polar cap inside it turned as well, which filled the top of the map with
+  full-speed arrows. "Polar features" under Generator wind leaves the hexagon's jet and the polar
+  cyclones out of the flow map altogether. The planet itself is made exactly as before.
+- Flow Map Maker: much more precise arrows. They are worked out from a flow twice as sharp, sit
+  closer together, bend along the flow (so they curve around storms), and are blue for east and
+  orange for west, dark on bright clouds and light on dark ones. Zoom with the mouse wheel or the
+  + and - buttons and move with the right mouse button to look at a single storm; the arrows get
+  finer as you zoom. Storm outlines show where each swirl is, and pointing at the map shows the
+  latitude, longitude, flow speed and direction, and the exact red and green values there.
+- Number fields no longer round their value when you only click into them and out again, so the
+  generator's storms keep their exact place.
+- Builds: the flow map a build makes is now exactly the one the Flow Map Maker makes for that
+  planet, including its storms, and it uses the Flow Map Maker settings you saved for the planet.
+  Before, the east-west and north-south flow were scaled separately, which squashed the storms'
+  turning. The "flow" settings in older presets (zonal_std, meridional_std) are no longer used.
+  The first build of a planet takes about 20 seconds longer for this.
+
 ## 1.1.12
 
 - Scatterer: the planet list entry no longer writes autoMainSun, which only a modified Scatterer
@@ -156,7 +215,7 @@
 - "Randomize poles", and "Surprise me" also changes the polar features that are on.
 - Two new example presets: Saturnine (hexagon in the north, one big vortex in the south)
   and JovianPoles (the Jovian planet with Jupiter's cyclone rings at both poles).
-- Builds with polar features take about 1.5–2× longer, because the flow is followed in
+- Builds with polar features take about 1.5-2× longer, because the flow is followed in
   smaller steps near the poles. Planets without polar features come out exactly as
   before.
 

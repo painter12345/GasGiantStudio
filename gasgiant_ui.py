@@ -10,12 +10,13 @@ except Exception:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gasgiant as gg
+import kopmod_ui
 
 GEN = os.path.join(gg.TOOL, 'gasgiant.py')
 RES = ['512', '1024', '2048', '4096', '8192', '16384']
 LIVE_RES = ['512', '1024']
-RES_INFO = {'512': 'about 10 s', '1024': 'about 30 s', '2048': 'about 1\u20132 min',
-            '4096': 'about 4 min', '8192': 'about 20\u201340 min', '16384': 'about 1\u20133 hours'}
+RES_INFO = {'512': 'about 10 s', '1024': 'about 30 s', '2048': 'about 1-2 min',
+            '4096': 'about 4 min', '8192': 'about 20-40 min', '16384': 'about 1-3 hours'}
 BG = '#1b1f27'
 PANEL = '#232934'
 FIELD = '#2c3340'
@@ -229,6 +230,27 @@ def make_style(root):
     root.option_add('*TCombobox*Listbox.background', FIELD)
     root.option_add('*TCombobox*Listbox.foreground', FG)
     root.option_add('*TCombobox*Listbox.selectBackground', ACC)
+    root.bind_class('Text', '<MouseWheel>', text_wheel)
+
+
+def hide(w):
+    w.pack_forget()
+    m = w.master
+    if not any(c.winfo_manager() for c in m.winfo_children()):
+        m.configure(height=1)
+
+
+def text_scroll(w, delta):
+    n = -int(delta / 120) * 4 if abs(delta) >= 120 else (-4 if delta > 0 else 4)
+    top, bot = w.yview()
+    if (n < 0 and top > 0) or (n > 0 and bot < 1):
+        w.yview_scroll(n, 'units')
+        return True
+    return False
+
+
+def text_wheel(e):
+    return 'break' if text_scroll(e.widget, e.delta) else None
 
 
 class ScrollFrame(ttk.Frame):
@@ -257,6 +279,9 @@ class ScrollFrame(ttk.Frame):
         self.canvas.unbind_all('<Button-5>')
 
     def _wheel(self, e):
+        w = self.winfo_containing(e.x_root, e.y_root)
+        if isinstance(w, tk.Text) and w is not e.widget and text_scroll(w, e.delta):
+            return
         self.canvas.yview_scroll(-1 * int(e.delta / 120) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1), 'units')
 
 
@@ -531,7 +556,7 @@ class ColourPicker(tk.Toplevel):
         fr = ttk.Frame(parent)
         fr.grid(row=row, column=1, sticky='w', pady=(6, 0))
         if not cols:
-            ttk.Label(fr, text='\u2013', style='Dim.TLabel').pack(side='left')
+            ttk.Label(fr, text='-', style='Dim.TLabel').pack(side='left')
         for c in cols[:14]:
             c = [int(round(float(v))) for v in c][:3]
             lab = tk.Label(fr, bg=hexcol(c), width=2, relief='solid', bd=1, cursor='hand2')
@@ -808,6 +833,8 @@ class ListEditor:
         sp = ttk.Spinbox(parent, textvariable=var, from_=f['lo'], to=f['hi'], increment=f['inc'], width=f['width'], format=fmt)
 
         def commit(_e=None, var=var):
+            if var.get().strip() == fmt % f['get'](item):
+                return
             try:
                 v = float(var.get().replace(',', '.'))
             except ValueError:
@@ -1240,7 +1267,7 @@ class ExportDialog(tk.Toplevel):
         self.name = self.P['name']
         self.builds = builds
         self.S = load_settings()
-        self.title('Export \u2013 %s' % self.name)
+        self.title('Export - %s' % self.name)
         self.configure(bg=BG)
         self.transient(app)
         self.resizable(False, False)
@@ -1333,7 +1360,7 @@ class ExportDialog(tk.Toplevel):
                 chk.state(['disabled'])
                 note.configure(text={'atmo': 'no atmosphere', 'aurora': 'no aurora'}.get(k, 'not in this build'))
         st = self.app.is_stale(self.res())
-        self.stat.configure(text='Note: the settings changed after this build \u2013 the export shows the build, not the new settings.' if st else '')
+        self.stat.configure(text='Note: the settings changed after this build - the export shows the build, not the new settings.' if st else '')
 
     def browse(self):
         d = filedialog.askdirectory(parent=self, title='Export to folder', initialdir=self.v_dir.get() if os.path.isdir(self.v_dir.get()) else gg.TOOL)
@@ -1416,6 +1443,8 @@ class ExportDialog(tk.Toplevel):
 
 
 class FlowWindow(tk.Toplevel):
+    HELP = 'Mouse wheel or + / - zooms, right-drag moves, double right-click shows the whole planet, left click adds a swirl.'
+
     def __init__(self, app, texture=None):
         super().__init__(app)
         self.app = app
@@ -1442,10 +1471,25 @@ class FlowWindow(tk.Toplevel):
         self.v_out = tk.StringVar()
         self.v_auto = tk.BooleanVar(value=True)
         self.v_eq = tk.StringVar(value='East')
+        self.v_gen = tk.BooleanVar(value=True)
+        self.genflow = None
+        self.gen_sharp = False
+        self.gen_P = self.gen_src = None
+        self.gen_token = 0
+        self.pending_save = None
+        self.tex_paths = {}
+        self.tex_path = ''
+        self.fuv = None
+        self.tex_tiled = self.flow_tiled = None
+        self.zoom, self.centre = 1.0, (180.0, 0.0)
+        self.pan = None
+        self.redraw_id = None
+        self.show_storms = tk.BooleanVar(value=True)
         self.build()
         self.show_folder()
-        textures = gg.list_textures()
-        start = texture if texture in textures else (textures[0] if textures else None)
+        textures = self.texture_choices()
+        outs = gg.list_outputs(app.P['name']) or gg.list_outputs()
+        start = outs[0] if outs else (texture if texture in textures else (textures[0] if textures else None))
         if start:
             self.set_texture(start)
         self.protocol('WM_DELETE_WINDOW', self.close)
@@ -1468,7 +1512,7 @@ class FlowWindow(tk.Toplevel):
         ttk.Label(p, text='Texture', style='Head.TLabel').pack(anchor='w', pady=(4, 4))
         r = ttk.Frame(p)
         r.pack(fill='x')
-        self.tex_cb = ttk.Combobox(r, textvariable=self.v_tex, values=gg.list_textures(), width=34, state='readonly')
+        self.tex_cb = ttk.Combobox(r, textvariable=self.v_tex, values=[], width=44, state='readonly')
         self.tex_cb.pack(side='left', padx=(8, 6))
         self.tex_cb.bind('<<ComboboxSelected>>', lambda e: self.set_texture(self.v_tex.get()))
         ttk.Button(r, text='Browse\u2026', command=self.browse).pack(side='left')
@@ -1486,51 +1530,73 @@ class FlowWindow(tk.Toplevel):
         e.bind('<FocusOut>', self.commit_out)
         self.info = ttk.Label(p, text='', style='Dim.TLabel', wraplength=520, justify='left')
         self.info.pack(anchor='w', padx=8, pady=(6, 0))
-        ttk.Label(p, text='Band jets', style='Head.TLabel').pack(anchor='w', pady=(14, 4))
-        ttk.Label(p, text='Neighbouring bands flow in opposite directions, like on Jupiter. '
+        self.gen_chk = ttk.Checkbutton(p, text='Use the generator’s wind and storms', variable=self.v_gen, command=self.toggle_gen)
+        self.gen_chk.pack(anchor='w', padx=8, pady=(8, 0))
+        self.gen_lab = ttk.Label(p, text='', style='Dim.TLabel', wraplength=520, justify='left')
+        self.gen_lab.pack(anchor='w', padx=8, pady=(2, 0))
+        mode = ttk.Frame(p)
+        mode.pack(fill='x')
+        self.img_frame = q = ttk.Frame(mode)
+        ttk.Label(q, text='Band jets', style='Head.TLabel').pack(anchor='w', pady=(14, 4))
+        ttk.Label(q, text='Neighbouring bands flow in opposite directions, like on Jupiter. '
                           'Their edges are found in the texture, or you set them yourself.', style='Dim.TLabel', wraplength=520).pack(anchor='w', padx=8)
-        ttk.Checkbutton(p, text='Find band edges automatically', variable=self.v_auto, command=self.toggle_auto).pack(anchor='w', padx=8, pady=(6, 0))
-        g = ttk.Frame(p)
-        g.pack(fill='x')
-        g.columnconfigure(1, weight=1)
+        ttk.Checkbutton(q, text='Find band edges automatically', variable=self.v_auto, command=self.toggle_auto).pack(anchor='w', padx=8, pady=(6, 0))
+        g = self.wind_grid(q)
         Slider(self.app, g, 0, 'Edge sensitivity', ('sensitivity',), 0.05, 0.9, 0.01, tip='lower = finds more, fainter edges', src=src, notify=self.changed, registry=self.sliders)
         Slider(self.app, g, 2, 'Smallest band (°)', ('min_gap',), 1, 20, 0.5, src=src, notify=self.changed, registry=self.sliders)
-        self.edge_ed = ListEditor(self.app, p, lambda: self.F['edges'], [num('Edge latitude', 'lat', -89, 89, 0.5, '%.1f', width=8)],
+        self.edge_ed = ListEditor(self.app, q, lambda: self.F['edges'], [num('Edge latitude', 'lat', -89, 89, 0.5, '%.1f', width=8)],
                                   lambda: {'lat': 0.0}, add_text='Add edge', notify=self.edges_changed, registry=self.editors)
         self.edge_ed.frame.pack(fill='x', pady=6, padx=8)
         ttk.Button(self.edge_ed.bar, text='Use the found edges', command=self.copy_edges).pack(side='left', padx=6)
-        r = ttk.Frame(p)
+        r = ttk.Frame(q)
         r.pack(fill='x', pady=(4, 0))
         ttk.Label(r, text='Equator flows').pack(side='left', padx=(8, 8))
         cb = ttk.Combobox(r, textvariable=self.v_eq, values=['East', 'West'], width=6, state='readonly')
         cb.pack(side='left')
         cb.bind('<<ComboboxSelected>>', self.commit_eq)
+        self.gen_frame = q = ttk.Frame(mode)
+        ttk.Label(q, text='Generator wind', style='Head.TLabel').pack(anchor='w', pady=(14, 4))
+        ttk.Label(q, text='The same wind that moved the clouds when this planet was made: every band jet in its real '
+                          'direction, the curls along the band edges, the polar features and every storm.',
+                  style='Dim.TLabel', wraplength=520).pack(anchor='w', padx=8)
+        g = self.wind_grid(q)
+        Slider(self.app, g, 0, 'Band-edge curls', ('swirls',), 0, 2, 0.05, tip='the small whirls along the band edges and the turbulence',
+               src=src, notify=self.changed, registry=self.sliders)
+        self.v_poles = tk.BooleanVar(value=True)
+        ttk.Checkbutton(q, text='Polar features: the jet along the hexagon\'s edge, and the polar cyclones', variable=self.v_poles,
+                        command=self.toggle_poles).pack(anchor='w', padx=8, pady=(6, 0))
         ttk.Label(p, text='Wind', style='Head.TLabel').pack(anchor='w', pady=(14, 4))
-        g = ttk.Frame(p)
-        g.pack(fill='x')
-        g.columnconfigure(1, weight=1)
+        g = self.wind_grid(p)
         Slider(self.app, g, 0, 'Jet speed', ('jets',), 0, 2, 0.05, src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 1, 'Jet unevenness', ('jet_variation',), 0, 1, 0.05, src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 2, 'Wobble', ('wobble',), 0, 0.5, 0.01, tip='small north-south drifting', src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 4, 'Wobble size', ('wobble_scale',), 1, 10, 0.1, tip='smaller = bigger wobbles', src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 6, 'Smoothing', ('smooth',), 0, 8, 0.25, src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 7, 'Overall strength', ('strength',), 10, 127, 1, isint=True, tip='how far from neutral grey the map goes (old maps ≈ 100)', src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 9, 'Calm poles from (°)', ('calm', 0), 30, 88, 1, isint=True, src=src, notify=self.changed, registry=self.sliders)
-        Slider(self.app, g, 10, 'Still at (°)', ('calm', 1), 35, 90, 1, isint=True, src=src, notify=self.changed, registry=self.sliders)
-        r = ttk.Frame(p)
+        hold = ttk.Frame(p)
+        hold.pack(fill='x')
+        self.img_wind = q = ttk.Frame(hold)
+        g = self.wind_grid(q)
+        Slider(self.app, g, 0, 'Jet unevenness', ('jet_variation',), 0, 1, 0.05, src=src, notify=self.changed, registry=self.sliders)
+        Slider(self.app, g, 1, 'Wobble', ('wobble',), 0, 0.5, 0.01, tip='small north-south drifting', src=src, notify=self.changed, registry=self.sliders)
+        Slider(self.app, g, 3, 'Wobble size', ('wobble_scale',), 1, 10, 0.1, tip='smaller = bigger wobbles', src=src, notify=self.changed, registry=self.sliders)
+        g = self.wind_grid(p)
+        Slider(self.app, g, 0, 'Smoothing', ('smooth',), 0, 8, 0.25, src=src, notify=self.changed, registry=self.sliders)
+        Slider(self.app, g, 1, 'Overall strength', ('strength',), 10, 127, 1, isint=True, tip='how far from neutral grey the map goes (old maps ≈ 100)', src=src, notify=self.changed, registry=self.sliders)
+        Slider(self.app, g, 3, 'Calm poles from (°)', ('calm', 0), 30, 88, 1, isint=True, src=src, notify=self.changed, registry=self.sliders)
+        Slider(self.app, g, 4, 'Still at (°)', ('calm', 1), 35, 90, 1, isint=True, src=src, notify=self.changed, registry=self.sliders)
+        r = ttk.Frame(q)
         r.pack(fill='x', pady=(6, 0))
         ttk.Button(r, text='Randomize wind', command=self.randomize).pack(side='left', padx=8)
         ttk.Button(r, text='New random wobble', command=self.reseed).pack(side='left')
         ttk.Label(p, text='Storm swirls', style='Head.TLabel').pack(anchor='w', pady=(14, 4))
-        ttk.Label(p, text='Makes a storm turn in place. Tip: click on the map on the right to put one there.',
-                  style='Dim.TLabel', wraplength=520).pack(anchor='w', padx=8)
+        self.storm_lab = ttk.Label(p, text='', style='Dim.TLabel', wraplength=520, justify='left')
+        self.storm_lab.pack(anchor='w', padx=8)
         self.storm_ed = ListEditor(self.app, p, lambda: self.F['storms'],
-                                   [num('Latitude', 'lat', -85, 85, 0.5, '%.1f'), num('Longitude', 'lon', 0, 360, 1, '%.0f'),
-                                    num('Radius (°)', 'radius', 0.5, 40, 0.5, '%.1f', 6.0), num('Stretch', 'aspect', 0.5, 4, 0.1, '%.1f', 1.5),
-                                    num('Strength', 'strength', 0, 3, 0.05, '%.2f', 0.8), spinf('Spin', 'spin')],
+                                   [{'label': 'Storm', 'kind': 'custom', 'make': self.storm_kind},
+                                    num('Latitude', 'lat', -85, 85, 0.5, '%.1f', width=5), num('Longitude', 'lon', 0, 360, 1, '%.1f', width=5),
+                                    num('Radius (°)', 'radius', 0.5, 40, 0.1, '%.1f', 6.0, width=5), num('Stretch', 'aspect', 0.5, 4, 0.1, '%.1f', 1.5, width=5),
+                                    num('Strength', 'strength', 0, 10, 0.05, '%.2f', 0.8, width=5), spinf('Spin', 'spin')],
                                    lambda: {'lat': -20.0, 'lon': 180.0, 'radius': 6.0, 'aspect': 1.5, 'strength': 0.8, 'spin': 1},
-                                   card=True, cols=6, add_text='Add storm swirl', notify=self.changed, registry=self.editors)
+                                   card=True, cols=7, add_text='Add storm swirl', notify=self.changed, registry=self.editors)
         self.storm_ed.frame.pack(fill='x', pady=6, padx=8)
+        self.gen_storm_btn = ttk.Button(self.storm_ed.bar, text='Reset to the generator’s storms', command=self.reset_gen_storms)
+        self.gen_storm_btn.pack(side='left', padx=6)
         vb = ttk.Frame(right)
         vb.pack(fill='x')
         for val, txt in (('arrows', 'Arrows'), ('anim', 'Animated'), ('map', 'Flow map')):
@@ -1542,17 +1608,55 @@ class FlowWindow(tk.Toplevel):
         self.undo_btn = ttk.Button(vb, text='Undo', command=self.undo, state='disabled')
         self.undo_btn.pack(side='right', padx=(0, 12))
         self.canvas = tk.Canvas(right, bg='#0d0f14', highlightthickness=1, highlightbackground=LINE, cursor='crosshair')
-        self.canvas.pack(fill='both', expand=True, pady=(8, 8))
-        self.canvas.bind('<Configure>', lambda e: self.show())
+        self.canvas.pack(fill='both', expand=True, pady=(8, 0))
+        self.canvas.bind('<Configure>', lambda e: self.redraw_soon())
         self.canvas.bind('<Button-1>', self.click_map)
+        for ev in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self.bind(ev, self.wheel)
+        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
+        for k in ('plus', 'equal', 'KP_Add'):
+            self.canvas.bind('<%s>' % k, lambda e: self.zoom_by(1.5))
+        for k in ('minus', 'KP_Subtract'):
+            self.canvas.bind('<%s>' % k, lambda e: self.zoom_by(1 / 1.5))
+        self.canvas.bind('<Home>', self.fit_view)
+        for b in ('2', '3'):
+            self.canvas.bind('<Button-%s>' % b, self.pan_start)
+            self.canvas.bind('<B%s-Motion>' % b, self.pan_move)
+        self.canvas.bind('<Double-Button-3>', self.fit_view)
+        self.canvas.bind('<Motion>', self.hover)
+        self.canvas.bind('<Leave>', lambda e: self.readout.configure(text=self.HELP))
+        zb = ttk.Frame(right)
+        zb.pack(fill='x', pady=(4, 6))
+        ttk.Button(zb, text='+', width=3, command=lambda: self.zoom_by(1.5)).pack(side='left')
+        ttk.Button(zb, text='-', width=3, command=lambda: self.zoom_by(1 / 1.5)).pack(side='left', padx=(4, 6))
+        ttk.Button(zb, text='Whole planet', command=self.fit_view).pack(side='left')
+        ttk.Checkbutton(zb, text='Storm outlines', variable=self.show_storms, command=self.show).pack(side='left', padx=10)
+        self.zoom_lab = ttk.Label(zb, text='', style='Dim.TLabel')
+        self.zoom_lab.pack(side='left', padx=(4, 0))
+        self.readout = ttk.Label(right, text=self.HELP, style='Dim.TLabel')
+        self.readout.pack(fill='x')
         g = ttk.Frame(right)
         g.pack(fill='x')
         g.columnconfigure(1, weight=1)
         Slider(self.app, g, 0, 'Preview motion (°)', ('preview_motion',), 1, 40, 0.5,
-               tip='only for the animation here – the real amount comes from speed/displacement in the EVE cloud config',
+               tip='how far fast clouds drift in one loop of the animation here - in game, speed/displacement in the EVE cloud config decide',
                src=src, notify=self.anim_changed, registry=self.sliders)
         self.stat = ttk.Label(right, text='', style='Dim.TLabel')
         self.stat.pack(fill='x', pady=(6, 0))
+
+    def wind_grid(self, parent):
+        g = ttk.Frame(parent)
+        g.pack(fill='x')
+        g.columnconfigure(0, minsize=150)
+        g.columnconfigure(1, weight=1)
+        return g
+
+    def storm_kind(self, parent, item):
+        t = {'small': 'Small', 'big': 'Big', 'chain': 'Chain'}.get(item.get('kind'), 'Yours')
+        return tk.Label(parent, text=t, bg=PANEL, fg=FG if item.get('kind') else ACC, font=(FONT, 9), width=6, anchor='w')
+
+    def gen_mode(self):
+        return self.gen_P is not None and bool(self.F.get('use_generator', True))
 
     def refresh(self):
         for s in self.sliders:
@@ -1562,7 +1666,70 @@ class FlowWindow(tk.Toplevel):
         self.v_auto.set(bool(self.F['auto_edges']))
         self.v_eq.set('East' if self.F['equator'] > 0 else 'West')
         self.v_out.set(self.F['out'])
+        self.v_gen.set(bool(self.F.get('use_generator', True)))
+        self.v_poles.set(bool(self.F.get('poles', True)))
         self.update_info()
+        self.update_mode()
+
+    def update_mode(self):
+        gen = self.gen_mode()
+        if self.gen_P is None:
+            self.gen_chk.pack_forget()
+            self.gen_lab.configure(text='Not made by the generator (no preset found), so the bands are guessed from the colours.')
+        else:
+            if not self.gen_chk.winfo_ismapped():
+                self.gen_chk.pack(anchor='w', padx=8, pady=(8, 0), before=self.gen_lab)
+            src = os.path.relpath(self.gen_src, gg.TOOL) if self.gen_src else '?'
+            t = 'Generator data: %s' % src.replace('\\', '/')
+            if gen and self.genflow is None:
+                t += '  -  reading its wind…'
+            elif gen and not self.gen_sharp:
+                t += '  -  rough preview, sharpening…'
+            self.gen_lab.configure(text=t)
+        for fr, on in ((self.img_frame, not gen), (self.gen_frame, gen), (self.img_wind, not gen)):
+            if on and not fr.winfo_ismapped():
+                fr.pack(fill='x')
+            elif not on:
+                hide(fr)
+        n = sum(1 for s in self.F['storms'] if s.get('kind'))
+        if gen:
+            t = ('%d storms found in the generator data (small ones too), each in its real place, size and spin. '
+                 'Change or remove them, or click on the map to add your own.' % n)
+        else:
+            t = 'Makes a storm turn in place. Tip: click on the map on the right to put one there.'
+        self.storm_lab.configure(text=t)
+        if self.gen_P is not None and gen:
+            if not self.gen_storm_btn.winfo_ismapped():
+                self.gen_storm_btn.pack(side='left', padx=6)
+        else:
+            self.gen_storm_btn.pack_forget()
+
+    def texture_choices(self):
+        self.tex_paths = {}
+        vals = []
+        for p in gg.list_outputs():
+            lab = 'Build: ' + os.path.relpath(p, gg.OUTROOT).replace('\\', '/')
+            self.tex_paths[lab] = p
+            vals.append(lab)
+        tex = gg.list_textures()
+        self.tex_cb.configure(values=vals + tex)
+        return tex
+
+    def label_for(self, path):
+        for lab, p in self.tex_paths.items():
+            if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(path)):
+                return lab
+        return path if not os.path.isabs(path) else os.path.basename(path)
+
+    def outputs_changed(self):
+        if not self.winfo_exists():
+            return
+        was_build = any(os.path.normcase(p) == os.path.normcase(self.tex_path) for p in self.tex_paths.values())
+        self.texture_choices()
+        outs = gg.list_outputs()
+        if outs and was_build and os.path.normcase(outs[0]) != os.path.normcase(self.tex_path):
+            self.set_texture(outs[0])
+            self.status('Switched to the new build: %s' % self.label_for(outs[0]))
 
     def update_info(self):
         hits = gg.eve_flow_info(self.F['out']) if self.F['out'] else []
@@ -1575,7 +1742,9 @@ class FlowWindow(tk.Toplevel):
         self.info.configure(text=t)
 
     def set_texture(self, name):
-        self.v_tex.set(name if not os.path.isabs(name) else os.path.basename(name))
+        name = self.tex_paths.get(name, name)
+        self.tex_path = gg.texture_path(name)
+        self.v_tex.set(self.label_for(name))
         body = gg.body_of(name)
         sp = os.path.join(gg.FLOWS, body + '.json')
         if os.path.isfile(sp):
@@ -1600,12 +1769,67 @@ class FlowWindow(tk.Toplevel):
             full = gg.load_texture(tp)
             self.full_rgb = full
             self.rgb_small = np.asarray(Image.fromarray(full).resize((1024, 512), Image.BOX))
+            im = Image.fromarray(full)
+            if im.width > 4096:
+                im = im.resize((4096, 2048), Image.BOX)
+            self.tex_tiled = Image.new('RGB', (im.width * 2, im.height))
+            self.tex_tiled.paste(im, (0, 0)); self.tex_tiled.paste(im, (im.width, 0))
         except Exception as ex:
             self.full_rgb = None
             messagebox.showerror('Could not open texture', str(ex), parent=self)
-        self.title('Flow Map Maker – %s' % body)
+        self.title('Flow Map Maker - %s' % body)
+        self.zoom, self.centre = 1.0, (180.0, 0.0)
+        self.flowimg = self.fuv = self.flow_tiled = None
+        self.gen_P, self.gen_src = gg.gen_preset_for(tp)
+        if self.gen_mode():
+            gg.sync_gen_storms(self.F, self.gen_P)
+        self.start_gen()
         self.refresh()
         self.changed()
+
+    def start_gen(self):
+        self.gen_token += 1
+        tok = self.gen_token
+        self.genflow = None
+        self.gen_sharp = False
+        if not self.gen_mode():
+            return
+        P = copy.deepcopy(self.gen_P)
+
+        def job():
+            try:
+                if not os.path.isfile(gg.GenFlow.cache_path(P, 1024)):
+                    self.q.put(('gen', tok, gg.GenFlow(P, 512, keyframes=1), False))
+                self.q.put(('gen', tok, gg.GenFlow(P, 1024), True))
+            except Exception as ex:
+                self.q.put(('generr', tok, str(ex), None))
+        threading.Thread(target=job, daemon=True).start()
+
+    def toggle_gen(self):
+        self.snapshot()
+        on = bool(self.v_gen.get())
+        self.F['use_generator'] = on
+        if on:
+            gg.sync_gen_storms(self.F, self.gen_P)
+        else:
+            self.F['storms'] = [s for s in self.F['storms'] if not s.get('kind')]
+            self.F['gen_key'] = 'off'
+        self.frames = []
+        self.start_gen()
+        self.refresh()
+        self.changed()
+
+    def reset_gen_storms(self):
+        if self.gen_P is None:
+            return
+        self.snapshot()
+        self.F['gen_key'] = 'reset'
+        gg.sync_gen_storms(self.F, self.gen_P)
+        self.storm_ed.rebuild()
+        self.update_mode()
+        self.frames = []
+        self.changed()
+        self.status('Storms reset to the generator’s')
 
     def show_folder(self):
         d = gg.texture_dir()
@@ -1623,8 +1847,7 @@ class FlowWindow(tk.Toplevel):
         S = load_settings()
         S['texture_dir'] = d
         save_settings(S)
-        tex = gg.list_textures()
-        self.tex_cb.configure(values=tex)
+        tex = self.texture_choices()
         self.show_folder()
         self.status('%d colour textures in %s' % (len(tex), d))
         if tex:
@@ -1648,6 +1871,12 @@ class FlowWindow(tk.Toplevel):
 
     def toggle_auto(self):
         self.F['auto_edges'] = bool(self.v_auto.get())
+        self.changed()
+
+    def toggle_poles(self):
+        self.snapshot()
+        self.F['poles'] = bool(self.v_poles.get())
+        self.frames = []
         self.changed()
 
     def edges_changed(self):
@@ -1682,6 +1911,8 @@ class FlowWindow(tk.Toplevel):
         if not self.history:
             self.undo_btn.configure(state='disabled')
         self.frames = []
+        if self.gen_mode() and self.genflow is None:
+            self.start_gen()
         self.refresh()
         self.changed()
 
@@ -1719,6 +1950,12 @@ class FlowWindow(tk.Toplevel):
         self.calc_id = None
         if self.rgb_small is None:
             return
+        gen = None
+        if self.gen_mode():
+            gen = self.genflow
+            if gen is None:
+                self.status('Reading the generator’s wind for %s…' % self.body)
+                return
         self.gen += 1
         g = self.gen
         F = copy.deepcopy(self.F)
@@ -1728,8 +1965,11 @@ class FlowWindow(tk.Toplevel):
 
         def job():
             try:
-                u, v, edges = gg.flow_field(F, 512, 256, rgb)
-                self.q.put(('flow', g, gg.encode_flow(u, v, float(F['strength'])), edges))
+                u, v, edges = gg.flow_field(F, 1024, 512, rgb, gen)
+                s = float(F['strength'])
+                fu = (np.clip(128 + s * u, 2, 253) - 128) / np.float32(127)
+                fv = (np.clip(128 + s * v, 2, 253) - 128) / np.float32(127)
+                self.q.put(('flow', g, (gg.encode_flow(u, v, s), fu.astype(np.float32), fv.astype(np.float32)), edges))
             except Exception as ex:
                 self.q.put(('err', g, str(ex), None))
         threading.Thread(target=job, daemon=True).start()
@@ -1747,7 +1987,7 @@ class FlowWindow(tk.Toplevel):
 
         def job():
             try:
-                self.q.put(('anim', g, gg.flow_frames(rgb, fl, mot, 24, 768), None))
+                self.q.put(('anim', g, gg.flow_frames(rgb, fl, mot, 64, 768), None))
             except Exception as ex:
                 self.q.put(('err', g, str(ex), None))
         threading.Thread(target=job, daemon=True).start()
@@ -1758,13 +1998,33 @@ class FlowWindow(tk.Toplevel):
         try:
             while True:
                 kind, g, data, extra = self.q.get_nowait()
+                if kind in ('gen', 'generr'):
+                    if g != self.gen_token:
+                        continue
+                    if kind == 'generr':
+                        self.status('Could not read the generator’s wind: ' + data)
+                        continue
+                    self.genflow, self.gen_sharp = data, extra
+                    self.update_mode()
+                    self.frames = []
+                    self.recalc()
+                    if extra and self.pending_save:
+                        p, self.pending_save = self.pending_save, None
+                        (self.export if p == 'export' else self.save)()
+                    continue
                 self.busy_jobs = max(0, self.busy_jobs - 1)
                 if g != self.gen:
                     continue
                 if kind == 'flow':
-                    self.flowimg = data
+                    self.flowimg, fu, fv = data
+                    self.fuv = (fu, fv)
+                    self.flow_tiled = None
                     self.edges_used = extra
-                    self.status('Band edges: ' + (', '.join('%g°' % e for e in extra) if extra else 'none'))
+                    if self.gen_mode():
+                        self.status('Generator wind: %d band edges, %d storm swirls%s' % (
+                            len(extra), len(self.F['storms']), '' if self.gen_sharp else ' (rough preview, sharpening…)'))
+                    else:
+                        self.status('Band edges: ' + (', '.join('%g°' % e for e in extra) if extra else 'none'))
                     if self.view.get() == 'anim':
                         self.make_anim()
                     else:
@@ -1794,27 +2054,133 @@ class FlowWindow(tk.Toplevel):
         self.img_box = ((cw - w) // 2, (ch - h) // 2, w, h)
         return im.resize((w, h), Image.LANCZOS)
 
+    def view_geom(self):
+        cw, ch = max(10, self.canvas.winfo_width()), max(10, self.canvas.winfo_height())
+        s = min((cw - 16) / 2.0, ch - 16)
+        w, h = max(2, int(s * 2)), max(1, int(s))
+        z = self.zoom if self.view.get() != 'anim' else 1.0
+        clon, clat = self.centre if self.view.get() != 'anim' else (180.0, 0.0)
+        dpp = 360.0 / z / w
+        return ((cw - w) // 2, (ch - h) // 2, w, h), (clon - 180.0 / z, clat + 90.0 / z, dpp)
+
+    def crop_view(self, tiled, view, w, h, resample=Image.LANCZOS):
+        lon0, lat0, dpp = view
+        W = tiled.width // 2
+        H = tiled.height
+        x0 = (lon0 % 360.0) / 360.0 * W
+        y0 = (90.0 - lat0) / 180.0 * H
+        return tiled.resize((w, h), resample, box=(x0, y0, x0 + w * dpp / 360.0 * W, y0 + h * dpp / 180.0 * H))
+
     def show(self):
         self.stop_anim()
+        if self.redraw_id:
+            self.after_cancel(self.redraw_id)
+            self.redraw_id = None
         self.canvas.delete('all')
         v = self.view.get()
         if self.rgb_small is None or self.flowimg is None:
             return
-        if v == 'arrows':
-            im = gg.flow_arrows(self.rgb_small, self.flowimg, 1024, 32)
-        elif v == 'map':
-            im = Image.fromarray(self.flowimg).resize((1024, 512), Image.BILINEAR)
-        else:
+        if v == 'anim':
             if not self.frames:
+                self.tkimg = ImageTk.PhotoImage(self.fit(Image.fromarray(self.rgb_small)))
+                self.canvas.create_image(self.img_box[0], self.img_box[1], image=self.tkimg, anchor='nw')
                 self.make_anim()
                 return
             self.tkframes = [ImageTk.PhotoImage(self.fit(f)) for f in self.frames]
             self.frame_i = 0
             self.play()
+            self.zoom_lab.configure(text='whole planet' if self.zoom > 1 else '')
             return
-        self.tkimg = ImageTk.PhotoImage(self.fit(im))
-        x0, y0, w, h = self.img_box
+        box, view = self.view_geom()
+        self.img_box = box
+        x0, y0, w, h = box
+        if v == 'arrows':
+            bg = self.crop_view(self.tex_tiled, view, w, h)
+            im, ref = gg.flow_arrows_view(bg, self.fuv[0], self.fuv[1], view, spacing=22,
+                                         storms=self.F['storms'] if self.show_storms.get() else ())
+            self.zoom_lab.configure(text='%s - blue east, orange west - longest arrow = %.0f%% of full flow' % (
+                'whole planet' if self.zoom <= 1 else 'zoom %gx' % round(self.zoom, 1), 100 * ref))
+        else:
+            if self.flow_tiled is None:
+                fl = Image.fromarray(self.flowimg)
+                self.flow_tiled = Image.new('RGB', (fl.width * 2, fl.height))
+                self.flow_tiled.paste(fl, (0, 0)); self.flow_tiled.paste(fl, (fl.width, 0))
+            im = self.crop_view(self.flow_tiled, view, w, h, Image.BILINEAR)
+            self.zoom_lab.configure(text='whole planet' if self.zoom <= 1 else 'zoom %gx' % round(self.zoom, 1))
+        self.tkimg = ImageTk.PhotoImage(im)
         self.canvas.create_image(x0, y0, image=self.tkimg, anchor='nw')
+
+    def redraw_soon(self, ms=40):
+        if self.redraw_id:
+            self.after_cancel(self.redraw_id)
+        self.redraw_id = self.after(ms, self.show)
+
+    def set_view(self, zoom, clon, clat):
+        self.zoom = min(max(zoom, 1.0), 32.0)
+        lim = 90.0 - 90.0 / self.zoom
+        self.centre = (clon % 360.0, min(max(clat, -lim), lim))
+        if self.view.get() != 'anim':
+            self.redraw_soon()
+
+    def screen_to_ll(self, x, y):
+        (x0, y0, w, h), (lon0, lat0, dpp) = self.view_geom()
+        if not (x0 <= x < x0 + w and y0 <= y < y0 + h):
+            return None
+        return (lon0 + (x - x0) * dpp) % 360.0, lat0 - (y - y0) * dpp
+
+    def wheel(self, e):
+        x, y = e.x_root - self.canvas.winfo_rootx(), e.y_root - self.canvas.winfo_rooty()
+        if not (0 <= x < self.canvas.winfo_width() and 0 <= y < self.canvas.winfo_height()):
+            return None
+        d = e.delta if e.delta else (120 if getattr(e, 'num', 0) == 4 else -120)
+        self.zoom_by(1.25 if d > 0 else 0.8, x, y)
+        return 'break'
+
+    def zoom_by(self, f, x=None, y=None):
+        if self.view.get() == 'anim':
+            self.status('Zoom works in the Arrows and Flow map views')
+            return
+        z = min(max(self.zoom * f, 1.0), 32.0)
+        ll = self.screen_to_ll(x, y) if x is not None else None
+        if ll is None:
+            self.set_view(z, *self.centre)
+            return
+        (x0, y0, w, h), _ = self.view_geom()
+        dpp = 360.0 / z / w
+        lon, lat = ll
+        self.set_view(z, lon - (x - x0) * dpp + 180.0 / z, lat + (y - y0) * dpp - 90.0 / z)
+
+    def pan_start(self, e):
+        self.pan = (e.x, e.y, self.centre)
+
+    def pan_move(self, e):
+        if not self.pan or self.view.get() == 'anim':
+            return
+        x, y, (clon, clat) = self.pan
+        dpp = self.view_geom()[1][2]
+        self.set_view(self.zoom, clon - (e.x - x) * dpp, clat + (e.y - y) * dpp)
+
+    def fit_view(self, _e=None):
+        self.set_view(1.0, 180.0, 0.0)
+
+    def hover(self, e):
+        try:
+            if self.focus_get() is not self.canvas:
+                self.canvas.focus_set()
+        except (KeyError, tk.TclError):
+            pass
+        ll = self.screen_to_ll(e.x, e.y)
+        if ll is None or self.fuv is None:
+            self.readout.configure(text=self.HELP)
+            return
+        lon, lat = ll
+        X, Y = np.array([lon / 360.0], np.float32), np.array([(90.0 - lat) / 180.0], np.float32)
+        u, v = float(gg.samp(self.fuv[0], X, Y)[0]), float(gg.samp(self.fuv[1], X, Y)[0])
+        m = np.hypot(u, v)
+        d = 'still' if m < 0.005 else '%s %.0f°' % (('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW')[int(((90 - np.degrees(np.arctan2(v, u))) % 360 + 22.5) // 45) % 8],
+                                                         (90 - np.degrees(np.arctan2(v, u))) % 360)
+        self.readout.configure(text='%.1f° %s, %.1f° E   flow %.2f toward %s   (R %d, G %d)' % (
+            abs(lat), 'N' if lat >= 0 else 'S', lon, m, d, int(round(128 + 127 * u)), int(round(128 + 127 * v))))
 
     def play(self):
         if self.view.get() != 'anim' or not self.tkframes:
@@ -1823,16 +2189,14 @@ class FlowWindow(tk.Toplevel):
         self.canvas.delete('all')
         self.canvas.create_image(x0, y0, image=self.tkframes[self.frame_i % len(self.tkframes)], anchor='nw')
         self.frame_i += 1
-        self.anim_id = self.after(70, self.play)
+        self.anim_id = self.after(50, self.play)
 
     def click_map(self, e):
-        if not self.img_box:
+        ll = self.screen_to_ll(e.x, e.y)
+        if ll is None:
             return
-        x0, y0, w, h = self.img_box
-        if not (x0 <= e.x < x0 + w and y0 <= e.y < y0 + h):
-            return
-        lon = round((e.x - x0) / w * 360, 0)
-        lat = round(90 - (e.y - y0) / h * 180, 1)
+        lon = round(ll[0], 1)
+        lat = round(ll[1], 1)
         self.F['storms'].append({'lat': lat, 'lon': lon, 'radius': 6.0, 'aspect': 1.5, 'strength': 0.8, 'spin': 1})
         self.storm_ed.rebuild()
         self.frames = []
@@ -1844,6 +2208,10 @@ class FlowWindow(tk.Toplevel):
         if not self.F['out']:
             messagebox.showerror('Flow map file', 'Please give the flow map a file name.', parent=self)
             return None
+        if self.gen_mode() and not (self.genflow is not None and self.gen_sharp):
+            self.pending_save = self.pending_save or 'save'
+            self.status('Saving as soon as the generator’s wind is read (the first time takes about half a minute)…')
+            return None
         os.makedirs(gg.FLOWS, exist_ok=True)
         body = gg.body_of(self.F['out'])
         F = copy.deepcopy(self.F)
@@ -1853,7 +2221,7 @@ class FlowWindow(tk.Toplevel):
             json.dump(F, f, indent=1)
         self.status('Saving the full-size flow map…')
         self.update_idletasks()
-        u, v, edges = gg.flow_field(self.F, 2048, 1024, self.full_rgb)
+        u, v, edges = gg.flow_field(self.F, 2048, 1024, self.full_rgb, self.genflow if self.gen_mode() else None)
         outp = os.path.join(gg.FLOWOUT, body + '_flow.truecolor')
         gg.save_truecolor(gg.encode_flow(u, v, float(self.F['strength'])), outp)
         self.status('Saved %s' % os.path.relpath(outp, gg.TOOL))
@@ -1862,6 +2230,8 @@ class FlowWindow(tk.Toplevel):
     def export(self):
         outp = self.save()
         if not outp:
+            if self.pending_save:
+                self.pending_save = 'export'
             return
         S = load_settings()
         start = S.get('flow_export_dir') or S.get('export_dir') or gg.FLOWOUT
@@ -2012,6 +2382,7 @@ class App(tk.Tk):
         self.tab_atmo()
         self.tab_aurora()
         self.tab_body()
+        self.cfg_tab = kopmod_ui.ConfigTab(self, sys.modules[__name__], gg, kind='planet')
         vb = ttk.Frame(right)
         vb.pack(fill='x')
         self.export_btn = ttk.Button(vb, text='Export…', command=self.export)
@@ -2169,7 +2540,7 @@ class App(tk.Tk):
             P['seed'] = random.randint(1, 99999)
         self.refresh_all()
         self.changed()
-        msg = 'Randomized %s – press Build to see the swirls, or Undo to go back' % ('everything' if what == 'all' else what)
+        msg = 'Randomized %s - press Build to see the swirls, or Undo to go back' % ('everything' if what == 'all' else what)
         self.after(300, lambda: self.status(msg))
 
     def section(self, parent, text):
@@ -2219,7 +2590,7 @@ class App(tk.Tk):
                           'It goes into the emissive map together with the glowing bands. Strength 0 = off.',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w')
         g = self.grid_box(p)
-        Slider(self, g, 0, 'Glow strength', ('heat_glow', 'strength'), 0, 2, 0.05, tip='0 = off, about 0.6\u20131 for a hot Jupiter')
+        Slider(self, g, 0, 'Glow strength', ('heat_glow', 'strength'), 0, 2, 0.05, tip='0 = off, about 0.6-1 for a hot Jupiter')
         Slider(self, g, 2, 'Dark clouds glow more', ('heat_glow', 'dark'), 0, 1, 0.05, tip='0 = even glow everywhere')
         Slider(self, g, 4, 'Cooler poles', ('heat_glow', 'poles'), 0, 1, 0.05)
         Slider(self, g, 5, 'Hot and cool patches', ('heat_glow', 'patches'), 0, 1, 0.05)
@@ -2345,7 +2716,7 @@ class App(tk.Tk):
         ttk.Button(ed.bar, text='Alternate spins', command=self.alt_spins).pack(side='left')
         ttk.Button(ed.bar, text='Auto-place', command=self.auto_edges).pack(side='left', padx=6)
         g = self.grid_box(p)
-        Slider(self, g, 0, 'Curl turns', ('curl_strength',), 2, 25, 0.5, tip='7–12 loose waves, 20+ tight spirals')
+        Slider(self, g, 0, 'Curl turns', ('curl_strength',), 2, 25, 0.5, tip='7-12 loose waves, 20+ tight spirals')
         Slider(self, g, 2, 'Curl spacing', ('curl_spacing',), 3, 15, 0.5, tip='smaller = more curls along an edge')
         Slider(self, g, 4, 'Curl reach', ('curl_window',), 3, 12, 0.5)
         Slider(self, g, 5, 'Edge waviness (°)', ('edge_wobble',), 0, 6, 0.1)
@@ -2436,8 +2807,8 @@ class App(tk.Tk):
         ttk.Label(tr, text='Centre colour').pack(side='left', padx=(8, 10))
         Swatch(self, tr, ('storms', 'core_color')).lab.pack(side='left')
         self.section(p, 'Big storms')
-        ttk.Label(p, text='Big versions of the small storms at a fixed place (lon 0\u2013360): a spiral with a bright '
-                          'centre. Stretch makes it an oval. Turns about 0.7\u20131.4; above about 1.5 the bands '
+        ttk.Label(p, text='Big versions of the small storms at a fixed place (lon 0-360): a spiral with a bright '
+                          'centre. Stretch makes it an oval. Turns about 0.7-1.4; above about 1.5 the bands '
                           'wind into rings around the storm.',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w')
         ttk.Label(p, text='Arms are spiral cloud arms coming out of the storm (0 = none). They curl the way the '
@@ -2495,7 +2866,7 @@ class App(tk.Tk):
                           'spinning storm inside. Cyclones: a ring of round storms around the pole with one in the '
                           'middle, like Jupiter\u2019s. Colours left on auto follow the band at that pole.',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w')
-        ttk.Label(p, text='Builds with polar features take about 1.5\u20132\u00d7 longer. Latitudes are '
+        ttk.Label(p, text='Builds with polar features take about 1.5-2\u00d7 longer. Latitudes are '
                           'degrees from the equator: 76 = 14\u00b0 from the pole (the south pole uses the same '
                           'numbers).', style='Dim.TLabel', wraplength=520).pack(anchor='w', pady=(4, 0))
         self.pole_eds = [PoleEditor(self, p, 'north', 'North pole'), PoleEditor(self, p, 'south', 'South pole')]
@@ -2763,7 +3134,7 @@ class App(tk.Tk):
         if not gg.has_aurora(self.P):
             self.view_src = None
             if not self.proc:
-                self.status('No aurora yet – tick “Aurora” on the Aurora tab')
+                self.status('No aurora yet - tick “Aurora” on the Aurora tab')
         else:
             self.aurora_request()
             self.view_src = self.aur_img
@@ -2994,7 +3365,7 @@ class App(tk.Tk):
             if not e['enabled']:
                 img = Image.blend(img, Image.new('RGB', img.size, (13, 15, 20)), 0.55)
                 d = ImageDraw.Draw(img)
-                d.text((12, 10), 'Rings are off \u2013 tick \u201cThis planet has rings\u201d', fill=(220, 225, 235), font=sheet_font(15))
+                d.text((12, 10), 'Rings are off - tick \u201cThis planet has rings\u201d', fill=(220, 225, 235), font=sheet_font(15))
             self.ring_img = ImageTk.PhotoImage(img)
             self.ring_cv.delete('all')
             self.ring_cv.create_image(0, 0, image=self.ring_img, anchor='nw')
@@ -3041,12 +3412,12 @@ class App(tk.Tk):
         self.changed()
         self.ring_schedule(10)
 
-    ATMO_TIPS = {'HR': 'HR \u2013 how fast the air thins out with height (km)',
-                 'HM': 'HM \u2013 how fast the haze thins out with height (km)',
-                 'm_mieG': 'm_mieG \u2013 how strongly the haze glows when you look towards the sun',
-                 'atmosphereStartRadiusScale': 'atmosphereStartRadiusScale \u2013 below 1 the air starts under the cloud tops',
-                 'averageGroundReflectance': 'averageGroundReflectance \u2013 light bounced back up from the planet',
-                 'godrayStrength': 'godrayStrength \u2013 only in game, not in this preview'}
+    ATMO_TIPS = {'HR': 'HR - how fast the air thins out with height (km)',
+                 'HM': 'HM - how fast the haze thins out with height (km)',
+                 'm_mieG': 'm_mieG - how strongly the haze glows when you look towards the sun',
+                 'atmosphereStartRadiusScale': 'atmosphereStartRadiusScale - below 1 the air starts under the cloud tops',
+                 'averageGroundReflectance': 'averageGroundReflectance - light bounced back up from the planet',
+                 'godrayStrength': 'godrayStrength - only in game, not in this preview'}
 
     def tab_atmo(self):
         sf = ScrollFrame(self.nb)
@@ -3102,7 +3473,7 @@ class App(tk.Tk):
         g = self.grid_box(p)
         Slider(self, g, 0, 'Air starts at (\u00d7 radius)', A + ('atmosphereStartRadiusScale',), 0.95, 1.05, 0.001,
                tip=self.ATMO_TIPS['atmosphereStartRadiusScale'])
-        self.section(p, 'Rayleigh scattering \u2013 the colour of the sky')
+        self.section(p, 'Rayleigh scattering - the colour of the sky')
         ttk.Label(p, text='m_betaR: how strongly the air scatters red, green and blue. Bigger = thicker, brighter air.',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w')
         g = self.grid_box(p)
@@ -3116,7 +3487,7 @@ class App(tk.Tk):
         self.atmo_sky_sw.bind('<Button-1>', lambda e: self.atmo_pick_colour('m_betaR'))
         ttk.Button(cr, text='Sky colour\u2026', command=lambda: self.atmo_pick_colour('m_betaR')).pack(side='left')
         ttk.Button(cr, text='Match the planet', command=self.atmo_match).pack(side='left', padx=6)
-        self.section(p, 'Mie scattering \u2013 haze')
+        self.section(p, 'Mie scattering - haze')
         ttk.Label(p, text='BETA_MSca: how much haze there is, for red, green and blue.', style='Dim.TLabel', wraplength=520).pack(anchor='w')
         g = self.grid_box(p)
         Slider(self, g, 0, 'Scale height (km)', A + ('HM',), 0.1, 60, 0.01, tip=self.ATMO_TIPS['HM'])
@@ -3132,30 +3503,30 @@ class App(tk.Tk):
         ttk.Button(cr, text='Grey haze', command=self.atmo_grey_haze).pack(side='left', padx=6)
         self.section(p, 'Absorbing layer (ozone)')
         self.atmo_oz = tk.BooleanVar(value=False)
-        ttk.Checkbutton(p, text='useOzone \u2013 a layer that swallows some colours (ozone, methane\u2026)', variable=self.atmo_oz,
+        ttk.Checkbutton(p, text='useOzone - a layer that swallows some colours (ozone, methane\u2026)', variable=self.atmo_oz,
                         command=lambda: self.atmo_flag('useOzone', self.atmo_oz)).pack(anchor='w', padx=(8, 0))
         g = self.grid_box(p)
         for i, c in enumerate(('Red', 'Green', 'Blue')):
             Slider(self, g, i, 'Absorbs ' + c.lower(), A + ('ozoneAbsorption', i), 0, 0.005, 0.000001)
-        Slider(self, g, 3, 'Height (km)', A + ('ozoneHeight',), 0, 300, 0.5, tip='ozoneHeight \u2013 the middle of the layer')
+        Slider(self, g, 3, 'Height (km)', A + ('ozoneHeight',), 0, 300, 0.5, tip='ozoneHeight - the middle of the layer')
         Slider(self, g, 5, 'Half thickness (km)', A + ('ozoneFalloff',), 0.5, 200, 0.5, tip='ozoneFalloff')
         self.section(p, 'Light')
         g = self.grid_box(p)
         Slider(self, g, 0, 'Light from below', A + ('averageGroundReflectance',), 0, 1, 0.01, tip=self.ATMO_TIPS['averageGroundReflectance'])
         Slider(self, g, 2, 'Godrays', A + ('godrayStrength',), 0, 1, 0.05, tip=self.ATMO_TIPS['godrayStrength'])
         self.atmo_ms = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p, text='multipleScattering \u2013 light that bounces around more than once (softer, brighter)',
+        ttk.Checkbutton(p, text='multipleScattering - light that bounces around more than once (softer, brighter)',
                         variable=self.atmo_ms, command=lambda: self.atmo_flag('multipleScattering', self.atmo_ms)).pack(anchor='w', padx=(8, 0), pady=(4, 0))
         self.section(p, 'Seen from orbit (the last config point)')
         g = self.grid_box(p)
         L = A + ('configPoints', -1)
         for i, (k, lab, lo, hi, st, tip) in enumerate((
-                ('skyExposure', 'Sky brightness', 0.005, 1.0, 0.005, 'skyExposure \u2013 the glow around the planet'),
-                ('scatteringExposure', 'Haze over the planet', 0.005, 1.0, 0.005, 'scatteringExposure \u2013 the light the air adds over the planet'),
-                ('extinctionThickness', 'Shade from the air', 0, 1.5, 0.01, 'extinctionThickness \u2013 how much the air darkens the planet below'),
-                ('extinctionTint', 'Coloured shade', 0, 1, 0.01, 'extinctionTint \u2013 0 = grey, 1 = in the colours of the air'),
+                ('skyExposure', 'Sky brightness', 0.005, 1.0, 0.005, 'skyExposure - the glow around the planet'),
+                ('scatteringExposure', 'Haze over the planet', 0.005, 1.0, 0.005, 'scatteringExposure - the light the air adds over the planet'),
+                ('extinctionThickness', 'Shade from the air', 0, 1.5, 0.01, 'extinctionThickness - how much the air darkens the planet below'),
+                ('extinctionTint', 'Coloured shade', 0, 1, 0.01, 'extinctionTint - 0 = grey, 1 = in the colours of the air'),
                 ('skyAlpha', 'Sky opacity', 0, 1, 0.01, 'skyAlpha'),
-                ('skyExtinctionTint', 'Sky shade colour', 0, 1, 0.01, 'skyExtinctionTint \u2013 tints the stars behind the air; not in the picture'))):
+                ('skyExtinctionTint', 'Sky shade colour', 0, 1, 0.01, 'skyExtinctionTint - tints the stars behind the air; not in the picture'))):
             Slider(self, g, i * 2, lab, L + (k,), lo, hi, st, tip=tip, notify=self.atmo_point_changed)
         self.section(p, 'Config points')
         ttk.Label(p, text='Scatterer blends between these by the camera\u2019s height above the planet (in metres). Below the first '
@@ -3205,7 +3576,7 @@ class App(tk.Tk):
         self.atmo_extra.pack(anchor='w', pady=(4, 0))
         self.atmo_extra.bind('<FocusOut>', self.atmo_commit_extra)
         self.section(p, 'Scatterer config')
-        ttk.Label(p, text='atmo.cfg \u2013 goes into GameData/<your mod>/Scatterer/Planets/<planet>/ (any .cfg name works):',
+        ttk.Label(p, text='atmo.cfg - goes into GameData/<your mod>/Scatterer/Planets/<planet>/ (any .cfg name works):',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w')
         self.atmo_cfg = tk.Text(p, height=14, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
         self.atmo_cfg.pack(anchor='w', pady=(4, 0))
@@ -3213,7 +3584,7 @@ class App(tk.Tk):
         br.pack(fill='x', pady=(6, 0))
         ttk.Button(br, text='Copy', command=lambda: self.atmo_copy('atmo')).pack(side='left')
         ttk.Button(br, text='Save atmo.cfg\u2026', command=self.atmo_save).pack(side='left', padx=6)
-        ttk.Label(p, text='Planet list entry \u2013 Scatterer only draws planets that are in its list:',
+        ttk.Label(p, text='Planet list entry - Scatterer only draws planets that are in its list:',
                   style='Dim.TLabel', wraplength=520).pack(anchor='w', pady=(10, 0))
         self.atmo_pl = tk.Text(p, height=12, width=64, bg=FIELD, fg=FG, insertbackground=FG, relief='flat', font=(MONO, 9), tabs=('0.9c',))
         self.atmo_pl.pack(anchor='w', pady=(4, 0))
@@ -3391,7 +3762,7 @@ class App(tk.Tk):
         self.atmo_refresh()
         self.refresh_atmo_sliders()
         self.changed()
-        self.status('Atmosphere values from \u201c%s\u201d \u2013 Undo goes back' % name)
+        self.status('Atmosphere values from \u201c%s\u201d - Undo goes back' % name)
 
     def atmo_fresh(self):
         e = dict(self.atmo_e())
@@ -3556,7 +3927,7 @@ class App(tk.Tk):
             r2 = os.path.dirname(r2)
         item, where = gg.find_planets_item(name, root)
         if item:
-            msg += ' \u2013 %s is already in the planet list (%s)' % (name, os.path.basename(where))
+            msg += ' - %s is already in the planet list (%s)' % (name, os.path.basename(where))
         else:
             pl = gg.planets_file(root, name)
             if messagebox.askyesno('Planet list', 'Scatterer only draws planets that are in its planet list, and %s isn\u2019t '
@@ -3768,6 +4139,8 @@ class App(tk.Tk):
             self.v_files['ring'].set('%s_ring.dds' % self.P['name'])
         self.pick.configure(values=self.preset_names())
         self.pick.set(self.P['name'])
+        if hasattr(self, 'cfg_tab'):
+            self.cfg_tab.refresh()
         self.update_title()
         self.update_view()
         self.update_res_info()
@@ -3778,7 +4151,7 @@ class App(tk.Tk):
         if self.P.get('big_storms') or self.P.get('storm_chains'):
             txt += '  \u00b7  big storms: about 1.3\u00d7 longer'
         if gg.has_poles(self.P):
-            txt += '  \u00b7  polar features: about 1.5\u20132\u00d7 longer'
+            txt += '  \u00b7  polar features: about 1.5-2\u00d7 longer'
         if r == '16384':
             txt += '  \u00b7  largest size KSP can load, very heavy in game'
         elif r == '8192':
@@ -3786,7 +4159,7 @@ class App(tk.Tk):
         self.res_info.configure(text=txt)
 
     def update_title(self):
-        self.title('Gas Giant Studio %s \u2013 %s%s' % (gg.APP_VERSION, self.P['name'], ' *' if self.dirty else ''))
+        self.title('Gas Giant Studio %s - %s%s' % (gg.APP_VERSION, self.P['name'], ' *' if self.dirty else ''))
 
     def changed(self):
         self.dirty = True
@@ -4008,8 +4381,8 @@ class App(tk.Tk):
                 built = gg.normalize(gg.merge(gg.DEFAULTS, json.load(fh)))
         except Exception:
             return None
-        a = {k: v for k, v in built.items() if k not in ('atmosphere', 'aurora')}
-        b = {k: v for k, v in self.P.items() if k not in ('atmosphere', 'aurora')}
+        a = {k: v for k, v in built.items() if k not in ('atmosphere', 'aurora', 'planet')}
+        b = {k: v for k, v in self.P.items() if k not in ('atmosphere', 'aurora', 'planet')}
         return json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True)
 
     def update_stale(self):
@@ -4017,7 +4390,7 @@ class App(tk.Tk):
             return
         v = self.view.get()
         if v in ('preview', 'flat') and self.is_stale():
-            self.status('Settings changed since this build – press Build to update')
+            self.status('Settings changed since this build - press Build to update')
 
     def update_view(self, from_live=False):
         self.pending = None
@@ -4032,7 +4405,7 @@ class App(tk.Tk):
             self.update_live_label(skey)
             if not self.ingame_any():
                 self.view_src = None
-                self.status('Nothing to show yet – tick an atmosphere or an aurora, or add glowing bands or a heat glow')
+                self.status('Nothing to show yet - tick an atmosphere or an aurora, or add glowing bands or a heat glow')
             else:
                 self.atmo_request()
                 self.view_src = self.atmo_img
@@ -4102,8 +4475,8 @@ class App(tk.Tk):
             sheet.paste(sph, (0, 0))
             self.view_src = sheet
             if not self.proc and self.map_tool.get() == 'turn':
-                self.status('Live preview \u2013 press Build for the full-size map' if self.live_on.get()
-                            else 'Bands only \u2013 swirls appear when you press Build')
+                self.status('Live preview - press Build for the full-size map' if self.live_on.get()
+                            else 'Bands only - swirls appear when you press Build')
             if not from_live:
                 self.request_live(skey)
             self.update_live_label(skey)
@@ -4116,12 +4489,12 @@ class App(tk.Tk):
                 except Exception:
                     self.view_src = None
                 if not self.proc:
-                    self.status('Settings changed since this build – press Build to update' if self.is_stale()
+                    self.status('Settings changed since this build - press Build to update' if self.is_stale()
                                 else 'Showing build at %s' % self.res.get())
             else:
                 self.view_src = None
                 if not self.proc:
-                    self.status('Nothing built at %s yet – press Build' % self.res.get())
+                    self.status('Nothing built at %s yet - press Build' % self.res.get())
         self.update_export_state()
         self.redraw()
 
@@ -4236,7 +4609,7 @@ class App(tk.Tk):
         if hint:
             self.status(hint)
         else:
-            self.status('Live preview \u2013 press Build for the full-size map' if self.live_on.get() else 'Bands only \u2013 swirls appear when you press Build')
+            self.status('Live preview - press Build for the full-size map' if self.live_on.get() else 'Bands only - swirls appear when you press Build')
         self.redraw()
 
     def set_tool(self, tool):
@@ -4283,7 +4656,7 @@ class App(tk.Tk):
             self.band_ed.rebuild()
             self.bands_changed()
             self.redraw()
-            self.status('Removed a band edge \u2013 Undo brings it back')
+            self.status('Removed a band edge - Undo brings it back')
             return
         mp = self.map_point(p)
         if mp is None:
@@ -4296,7 +4669,7 @@ class App(tk.Tk):
             self.P['storm_chains'].pop(ci)
             self.chain_done()
             self.redraw()
-            self.status('Removed a storm chain \u2013 Undo brings it back')
+            self.status('Removed a storm chain - Undo brings it back')
             return
         i = self.storm_near(*mp)
         if i is None:
@@ -4305,7 +4678,7 @@ class App(tk.Tk):
         self.P['big_storms'].pop(i)
         self.storm_done()
         self.redraw()
-        self.status('Removed a big storm \u2013 Undo brings it back')
+        self.status('Removed a big storm - Undo brings it back')
 
     def drag_start(self, e):
         self.drag = None
@@ -4361,7 +4734,7 @@ class App(tk.Tk):
                 self.P['big_storms'].append(s)
                 i = len(self.P['big_storms']) - 1
                 self.storm_set_pos(i, *mp)
-                self.status('Added a big storm at %.1f\u00b0, %.0f\u00b0 \u2013 drag to move it, settings in the Storms tab' % (self.P['big_storms'][i]['lat'], self.P['big_storms'][i]['lon']))
+                self.status('Added a big storm at %.1f\u00b0, %.0f\u00b0 - drag to move it, settings in the Storms tab' % (self.P['big_storms'][i]['lat'], self.P['big_storms'][i]['lon']))
                 self.sdrag = [i, True]
             else:
                 self.sdrag = [i, False]
@@ -4463,7 +4836,7 @@ class App(tk.Tk):
                 c = self.new_chain_from(d['a'], d['b'])
                 self.P['storm_chains'].append(c)
                 self.chain_done()
-                self.status('Added a chain of %d storms \u2013 count, size and look are in the Storms tab' % c['count'])
+                self.status('Added a chain of %d storms - count, size and look are in the Storms tab' % c['count'])
             elif d['moved']:
                 self.chain_done()
             else:
@@ -4505,7 +4878,7 @@ class App(tk.Tk):
                 ed.rebuild()
             self.bands_changed()
             self.redraw()
-            self.status('Split the band at %.1f\u00b0 \u2013 pick the new band\u2019s colour in the band list' % lat)
+            self.status('Split the band at %.1f\u00b0 - pick the new band\u2019s colour in the band list' % lat)
             return
         if tool != 'turn':
             return
@@ -4541,7 +4914,7 @@ class App(tk.Tk):
             if L is not None and L['key'] == key:
                 txt = 'swirls %d px \u00b7 %.1f s' % (L['W'], L['dt'])
                 if L['W'] < self.live_target():
-                    txt += ' \u2013 sharpening\u2026'
+                    txt += ' - sharpening\u2026'
             else:
                 txt = 'updating swirls\u2026'
         self.live_lab.configure(text=txt)
@@ -4681,9 +5054,9 @@ class App(tk.Tk):
             self.view_geom = None
             txt = 'No picture yet'
             if self.view.get() == 'atmo':
-                txt = 'Drawing the planet as in game…' if self.ingame_any() else 'Nothing to show yet – tick an atmosphere or an aurora'
+                txt = 'Drawing the planet as in game…' if self.ingame_any() else 'Nothing to show yet - tick an atmosphere or an aurora'
             if self.view.get() == 'aurora':
-                txt = 'Drawing the aurora…' if gg.has_aurora(self.P) else 'No aurora – tick “Aurora” on the Aurora tab'
+                txt = 'Drawing the aurora…' if gg.has_aurora(self.P) else 'No aurora - tick “Aurora” on the Aurora tab'
             self.canvas.create_text(cw // 2, ch // 2, text=txt, fill=DIM, font=(FONT, 12))
             return
         iw, ih = self.view_src.size
@@ -4817,6 +5190,9 @@ class App(tk.Tk):
             self.proc = None
             self.set_busy(False)
             self.done_cb(rc)
+            for w in self.winfo_children():
+                if isinstance(w, FlowWindow):
+                    w.outputs_changed()
             if self.view.get() == 'bands':
                 self.update_view()
         else:
@@ -4833,11 +5209,11 @@ class App(tk.Tk):
             elif 'trace' in w:
                 pct = int(w[w.index('trace') + 1].rstrip('%'))
                 self.prog['value'] = 25 + 0.55 * pct
-                self.status('Moving the clouds \u2013 %d%%' % pct)
+                self.status('Moving the clouds - %d%%' % pct)
             elif 'color' in w and w[-1].endswith('%'):
                 pct = int(w[-1].rstrip('%'))
                 self.prog['value'] = 80 + 0.12 * pct
-                self.status('Colouring \u2013 %d%%' % pct)
+                self.status('Colouring - %d%%' % pct)
             elif 'color' in w and 'done' in w:
                 self.prog['value'] = 92
                 self.status('Writing game files')
@@ -4860,14 +5236,14 @@ class App(tk.Tk):
     def built(self, rc):
         if self.cancelled:
             self.cancelled = False
-            self.status('Cancelled – Build again continues where it stopped')
+            self.status('Cancelled - Build again continues where it stopped')
         elif rc == 0:
             self.prog['value'] = 100
             self.view.set('preview')
             self.update_view()
-            self.status('Done – %s at %s' % (self.P['name'], self.res.get()))
+            self.status('Done - %s at %s' % (self.P['name'], self.res.get()))
         else:
-            self.status('Build failed – see the log below')
+            self.status('Build failed - see the log below')
             if messagebox.askyesno('Build failed', 'The build stopped with an error (details in the log).\n\nTry again from scratch?', parent=self):
                 self.prog['value'] = 0
                 self.run(['make', self.preset_file, '--res', self.res.get(), '--fresh'], self.built)
@@ -4883,7 +5259,7 @@ class App(tk.Tk):
         self.commit_entries()
         b = self.builds()
         if not b:
-            messagebox.showinfo('Build first', 'Press Build first \u2013 Export saves the files of a build.', parent=self)
+            messagebox.showinfo('Build first', 'Press Build first - Export saves the files of a build.', parent=self)
             return
         ExportDialog(self, b)
 

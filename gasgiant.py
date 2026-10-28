@@ -1,10 +1,11 @@
 import sys, os, io, json, copy, time, shutil, struct, hashlib, tempfile, argparse
 import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
+import kopmod
 Image.MAX_IMAGE_PIXELS = None
 
 APP_NAME = 'Gas Giant Studio'
-APP_VERSION = '1.1.12'
+APP_VERSION = '1.1.13'
 VERSION = '5'
 FROZEN = bool(getattr(sys, 'frozen', False))
 TOOL = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -1028,7 +1029,7 @@ def parse_cfg(text):
     root = {'name': '', 'values': [], 'nodes': []}
     stack = [root]
     pending = ''
-    for raw in text.replace('﻿', '').splitlines():
+    for raw in text.replace('ï»¿', '').splitlines():
         line = raw.split('//', 1)[0].strip()
         while line:
             if line[0] == '{':
@@ -1328,6 +1329,7 @@ def normalize(P):
     P['rings'] = ring_entry(P.get('rings'))
     P['atmosphere'] = atmo_entry(P.get('atmosphere'))
     P['aurora'] = aurora_entry(P.get('aurora'))
+    P['planet'] = kopmod.planet_entry(P.get('planet'), kopmod.planet_base(sys.modules[__name__]))
     P.pop('glows', None)
     sort_bands(P)
     return P
@@ -1782,7 +1784,7 @@ class Field:
         r = self.big_rv(k)
         return np.float32(s['spin']) * np.float32(s['turns']) * 5.18 * sg * sg * asp * np.exp(-(r / sg) ** 2)
 
-    def polar_psi(self, k):
+    def polar_psi(self, k, edge_only=False):
         T1, T2, T3, T4, T5 = self.T
         X, Y, Z, LA, LO = self.X, self.Y, self.Z, self.LA, self.LO
         out = np.zeros_like(LA)
@@ -1792,9 +1794,11 @@ class Field:
             if e['type'] == 'hexagon':
                 a = np.float32(max(90.0 - float(e['lat']), 1.0) * D)
                 q = hex_q(e, c, LO)
-                wq = np.float32(max(float(e['band_width']), 0.3) * D * 1.3) / a
+                wq = np.float32(max(float(e['band_width']), 0.3) * D * (0.5 if edge_only else 1.3)) / a
                 amp = np.float32(0.25 * float(e['jet'])) * a / np.float32(2 * np.pi) * wq
                 out -= spin * amp * np.tanh((q - 1) / wq)
+                if edge_only:
+                    continue
                 if float(e['wobble']):
                     out += np.float32(float(e['wobble']) * 0.8) * amp * fbm(T1, X * 7 + 4.1, Y * 7, Z * 7 + 2.3, o=3) * np.exp(-((q - 1) / (2.5 * wq)) ** 2)
                 sv = np.float32(0.55) * a / np.float32(2 * np.pi)
@@ -1809,7 +1813,7 @@ class Field:
                     out += np.float32(float(e['wobble']) * 0.0012) * capm * fbm(T1, X * 6 + 4.1, Y * 6 + 1.7, Z * 6, o=3)
         return out
 
-    def keyframe(self, k):
+    def eddy_psi(self, k):
         P = self.P; T1, T2, T3, T4, T5 = self.T
         X, Y, Z, LA, LO = self.X, self.Y, self.Z, self.LA, self.LO
         o = np.float32(k * 0.41)
@@ -1833,12 +1837,21 @@ class Field:
         s_ = np.float32(P['turbulence_scale'])
         pn = fbm(T1, X * s_ + o, Y * s_ + o * 0.5, Z * s_ * 1.8 + o * 0.8, o=3, gain=0.5)
         pn = pn * np.float32(P['turbulence'])
-        d = LA / D; jet = np.zeros_like(LA)
-        es = sorted([(ed['lat'], ed['spin']) for ed in P['edges']])
+        return psi, pn
+
+    def jet_shape(self):
+        d = self.LA / D; jet = np.zeros_like(self.LA)
+        es = sorted([(ed['lat'], ed['spin']) for ed in self.P['edges']])
         for (elo, slo), (ehi, _) in zip(es[:-1], es[1:]):
             inz = (d >= elo) & (d < ehi)
             jet[inz] = (-slo * np.sin(np.pi * (d[inz] - elo) / (ehi - elo)) * (1 + 0.25 * np.sin(d[inz] * 0.7)))
-        jet = jet * np.float32(P['jets']) * self.pfade
+        return jet
+
+    def keyframe(self, k):
+        P = self.P
+        LA = self.LA
+        psi, pn = self.eddy_psi(k)
+        jet = self.jet_shape() * np.float32(P['jets']) * self.pfade
         dn = np.float32(0.5 / self.VH)
         if self.big:
             jr = jet[:, 0]
@@ -2096,7 +2109,7 @@ def out_dir(P, res):
 
 
 def work_dir(P, raw, res):
-    h = hashlib.sha1((VERSION + json.dumps({k: v for k, v in raw.items() if k != 'aurora'}, sort_keys=True) + str(res)).encode()).hexdigest()[:12]
+    h = hashlib.sha1((VERSION + json.dumps({k: v for k, v in raw.items() if k not in ('aurora', 'planet')}, sort_keys=True) + str(res)).encode()).hexdigest()[:12]
     d = os.path.join(tempfile.gettempdir(), 'gasgiant_work', '%s_%d_%s' % (P['name'], res, h))
     os.makedirs(d, exist_ok=True)
     return d
@@ -2348,6 +2361,43 @@ def aurora_layers(e):
     return out
 
 
+def fx_only_volume(d, lo, hi, type_name):
+    t = '\t'
+    g = lambda v: '%.6g' % v
+    return [t * d + 'layerRaymarchedVolumeV5', t * d + '{',
+            t * (d + 1) + 'scaledFadeStartAltitude = -2000',
+            t * (d + 1) + 'scaledFadeEndAltitude = -1000',
+            t * (d + 1) + 'coverageMap', t * (d + 1) + '{',
+            t * (d + 2) + 'value = ' + AURORA_COVERAGE,
+            t * (d + 2) + 'type = AlphaMap',
+            t * (d + 2) + 'alphaMask = ALPHAMAP_R',
+            t * (d + 1) + '}',
+            t * (d + 1) + 'raymarchingSettings', t * (d + 1) + '{',
+            t * (d + 2) + 'adaptiveStepSizeFactor = 0',
+            t * (d + 2) + 'baseStepSize = 90000000',
+            t * (d + 2) + 'maxStepSize = 90000000',
+            t * (d + 2) + 'lightMarchDistance = 0',
+            t * (d + 2) + 'lightMarchSteps = 0',
+            t * (d + 2) + 'fxOnlyLayer = True',
+            t * (d + 1) + '}',
+            t * (d + 1) + 'cloudTypes', t * (d + 1) + '{',
+            t * (d + 2) + 'Item', t * (d + 2) + '{',
+            t * (d + 3) + 'typeName = ' + type_name,
+            t * (d + 3) + 'minAltitude = ' + g(lo),
+            t * (d + 3) + 'maxAltitude = ' + g(hi),
+            t * (d + 3) + 'interpolateCloudHeights = false',
+            t * (d + 3) + 'baseNoiseTiling = 0',
+            t * (d + 3) + 'density = 0.0',
+            t * (d + 3) + 'lightningFrequency = 0.0',
+            t * (d + 3) + 'coverageCurve', t * (d + 3) + '{', t * (d + 4) + 'key = 0 0', t * (d + 3) + '}',
+            t * (d + 3) + 'densityCurve', t * (d + 3) + '{', t * (d + 3) + '}',
+            t * (d + 2) + '}', t * (d + 1) + '}',
+            t * (d + 1) + 'noise', t * (d + 1) + '{', t * (d + 1) + '}',
+            t * (d + 1) + 'lightVolumeSettings', t * (d + 1) + '{', t * (d + 2) + 'useLightVolume = False', t * (d + 1) + '}',
+            t * (d + 1) + 'phaseFunctions', t * (d + 1) + '{', t * (d + 1) + '}',
+            t * d + '}']
+
+
 def aurora_cfg(P, name, tex_low, tex_top):
     e = aurora_entry(P.get('aurora'))
     t = '\t'
@@ -2376,38 +2426,8 @@ def aurora_cfg(P, name, tex_low, tex_top):
               t * 4 + '_DetailDist = 2E-06',
               t * 4 + '_MinLight = 1',
               t * 3 + '}', t * 2 + '}',
-              t * 2 + 'layerRaymarchedVolumeV5', t * 2 + '{',
-              t * 3 + 'scaledFadeStartAltitude = -2000',
-              t * 3 + 'scaledFadeEndAltitude = -1000',
-              t * 3 + 'coverageMap', t * 3 + '{',
-              t * 4 + 'value = ' + AURORA_COVERAGE,
-              t * 4 + 'type = AlphaMap',
-              t * 4 + 'alphaMask = ALPHAMAP_R',
-              t * 3 + '}',
-              t * 3 + 'raymarchingSettings', t * 3 + '{',
-              t * 4 + 'adaptiveStepSizeFactor = 0',
-              t * 4 + 'baseStepSize = 90000000',
-              t * 4 + 'maxStepSize = 90000000',
-              t * 4 + 'lightMarchDistance = 0',
-              t * 4 + 'lightMarchSteps = 0',
-              t * 4 + 'fxOnlyLayer = True',
-              t * 3 + '}',
-              t * 3 + 'cloudTypes', t * 3 + '{',
-              t * 4 + 'Item', t * 4 + '{',
-              t * 5 + 'typeName = AuroraEmpty',
-              t * 5 + 'minAltitude = ' + g(lo),
-              t * 5 + 'maxAltitude = ' + g(hi),
-              t * 5 + 'interpolateCloudHeights = false',
-              t * 5 + 'baseNoiseTiling = 0',
-              t * 5 + 'density = 0.0',
-              t * 5 + 'lightningFrequency = 0.0',
-              t * 5 + 'coverageCurve', t * 5 + '{', t * 6 + 'key = 0 0', t * 5 + '}',
-              t * 5 + 'densityCurve', t * 5 + '{', t * 5 + '}',
-              t * 4 + '}', t * 3 + '}',
-              t * 3 + 'noise', t * 3 + '{', t * 3 + '}',
-              t * 3 + 'lightVolumeSettings', t * 3 + '{', t * 4 + 'useLightVolume = False', t * 3 + '}',
-              t * 3 + 'phaseFunctions', t * 3 + '{', t * 3 + '}',
-              t * 2 + '}', t + '}']
+              ] + fx_only_volume(2, lo, hi, 'AuroraEmpty') + [
+              t + '}']
     L.append('}')
     return '\n'.join(L) + '\n'
 
@@ -2607,21 +2627,270 @@ def export_maps(src_dir, name, P, jobs, folder, size=None, flip=True, log=print)
     return written
 
 
-def write_flow(KF, P, path):
-    F = KF.mean(0)
-    u = F.real.astype(np.float32); v = (-F.imag).astype(np.float32)
-    if u.shape != (1024, 2048):
-        u = np.asarray(Image.fromarray(u, 'F').resize((2048, 1024), Image.BILINEAR))
-        v = np.asarray(Image.fromarray(v, 'F').resize((2048, 1024), Image.BILINEAR))
-    fl = P['flow']
-    u = gblur(u, fl['smooth']); v = gblur(v, fl['smooth'])
-    R = np.clip(128 + u / max(u.std(), 1e-9) * fl['zonal_std'], 4, 251)
-    G = np.clip(128 + v / max(v.std(), 1e-9) * fl['meridional_std'], 4, 251)
-    B = np.full_like(R, 128)
-    img = np.stack([R, G, B], -1).astype(np.uint8)
-    b = io.BytesIO(); Image.fromarray(img, 'RGB').save(b, 'PNG')
-    with open(path, 'wb') as f:
-        f.write(b.getvalue())
+KOP_DEFAULTS = {'radius': 6000.0, 'gravity': 0.8, 'rotation': 10.0, 'albedo': 0.35, 'sma': 68773560.0, 'ecc': 0.05, 'inc': 1.3,
+                'lan': 52.0, 'mean_anomaly': 0.1, 'atmo': True, 'pressure': 1500.0, 'temperature': 150.0, 'atmo_height': 200.0,
+                'molar_mass': 0.0024, 'adiabatic': 1.43, 'clouds': True, 'cloud_speed': 0.06, 'cloud_displacement': 0.2,
+                'cloud_altitude': 20000.0}
+KOP_ATMO = True
+KOP_RADIUS = True
+KOP_GROUND = False
+KOP_MASS_REF = 'Jool'
+KOP_LABELS = {'pressure': 'Pressure at the cloud tops'}
+KOP_BIOMES_LABEL = 'Make a biome map from the bands, polar features and big storms'
+KOP_SECTIONS = (('Clouds (EVE)', 'clouds', 'Make an EVE cloud layer that moves the colour map with the flow map',
+                 (('cloud_speed', 'Flow speed', ''), ('cloud_displacement', 'Flow displacement', ''), ('cloud_altitude', 'Cloud altitude', 'm'))),)
+GAS_DEPTH = 170.0 / 11.0
+GAS_TEMP = ((0.0, 1.0), (0.235, 0.633), (0.53, 0.467), (0.765, 0.567), (1.0, 0.733))
+BIOME_COLOURS = ((200, 200, 60), (200, 60, 200), (200, 60, 60), (60, 200, 200), (60, 60, 200), (60, 200, 60),
+                 (230, 140, 40), (140, 40, 230), (40, 140, 230), (230, 230, 230))
+
+
+def band_colour_at(P, lat):
+    c = P['bands'][0][1]
+    for b in P['bands']:
+        if float(b[0]) <= lat:
+            c = b[1]
+    return [float(x) / 255.0 for x in c]
+
+
+def planet_colours(P):
+    m = np.array([b[1] for b in P['bands']], np.float64).mean(0) / 255.0
+    m = m / max(float(m.max()), 1e-6)
+    return {'light': list(m * 0.76), 'ambient': list(m * 0.76 * 0.4), 'orbit': list(m * 0.8),
+            'gradient': [band_colour_at(P, 0.0), band_colour_at(P, 35.0), band_colour_at(P, 72.0)]}
+
+
+def biome_list(P):
+    poles = P.get('poles') or {}
+    pc = float(min(max(float(P['polar_calm'][0]), 45.0), 80.0))
+
+    def pole(key):
+        side = 'North' if key == 'north' else 'South'
+        t = (poles.get(key) or {}).get('type', 'none')
+        return {'hexagon': (side + 'PolarHexagon', side + ' Polar Hexagon'),
+                'cyclones': (side + 'PolarCyclones', side + ' Polar Cyclones')}.get(t, (side + 'PolarRegion', side + ' Polar Region'))
+    zones = [pole('north') + (1.1, (pc, 90.0)), ('NorthernBelts', 'Northern Belts', 1.0, (15.0, pc)),
+             ('EquatorialZone', 'Equatorial Zone', 1.0, (-15.0, 15.0)), ('SouthernBelts', 'Southern Belts', 1.0, (-pc, -15.0)),
+             pole('south') + (1.1, (-90.0, -pc))]
+    for j, b in enumerate(P.get('big_storms', [])):
+        zones.append(('GreatStorm' + ('' if j == 0 else str(j + 1)), 'Great Storm' + ('' if j == 0 else ' %d' % (j + 1)), 1.2, j))
+    return [(n, dn, v, BIOME_COLOURS[i % len(BIOME_COLOURS)], z) for i, (n, dn, v, z) in enumerate(zones)]
+
+
+def biome_map(P, W=1024):
+    H = W // 2
+    LA, LO = grid(W, H)
+    lat = LA / D
+    img = np.zeros((H, W, 3), np.uint8)
+    for n, dn, v, col, z in biome_list(P):
+        if isinstance(z, tuple):
+            img[(lat >= z[0]) & (lat <= z[1])] = col
+    big = [big_storm(b) for b in P.get('big_storms', [])]
+    for n, dn, v, col, z in biome_list(P):
+        if not isinstance(z, tuple):
+            r = storm_polar(big[z], LA, LO, P['seed'], z)[0]
+            img[r < float(big[z]['size']) * 1.1] = col
+    return img
+
+
+def clouds_cfg(P, color_rel, flow_rel=None):
+    e = P['planet']; name = P['name']
+    T = '\t'
+    L = ['EVE_CLOUDS', '{', T + 'OBJECT', T + '{', T * 2 + 'name = %s-clouds' % name, T * 2 + 'body = ' + name,
+         T * 2 + 'detailSpeed = 0,6,0', T * 2 + 'offset = 180,0,0', T * 2 + 'altitude = %d' % int(round(e['cloud_altitude'])),
+         T * 2 + 'settings', T * 2 + '{'] + [T * 3 + s for s in (
+        '_DetailScale = 30', '_UVNoiseTex = StockVolumetricClouds/Clouds/Textures/PluginData/uvnoise1', '_UVNoiseAnimation = 0, 0',
+        '_UVNoiseStrength = 0', '_Color = 215,215,215 ,255', '_speed = 0', '_displacement = 0', '_UVNoiseScale = 0',
+        '_flowSpeed = 0', '_flowStrength = 0', '_DetailTex', '{', '\tvalue = StockVolumetricClouds/Clouds/Textures/PluginData/detail1', '}')]
+    if flow_rel:
+        L += [T * 3 + '_FlowMap', T * 3 + '{', T * 4 + 'speed = ' + cfg_num(e['cloud_speed']),
+              T * 4 + 'displacement = ' + cfg_num(e['cloud_displacement']), T * 4 + 'texture', T * 4 + '{',
+              T * 5 + 'value = ' + flow_rel, T * 4 + '}', T * 3 + '}']
+    L += [T * 3 + '_MainTex', T * 3 + '{', T * 4 + 'value = ' + color_rel, T * 3 + '}', T * 2 + '}',
+          T * 2 + 'layer2D', T * 2 + '{', T * 3 + 'macroCloudMaterial', T * 3 + '{', T * 3 + '}', T * 2 + '}']
+    if has_aurora(P):
+        alt = int(round(e['cloud_altitude']))
+        L += fx_only_volume(2, alt - 500, alt + 500, 'CloudsEmpty')
+    L += [T + '}', '}']
+    return '\n'.join(L) + '\n'
+
+
+def kop_normalize(raw):
+    return normalize(merge(DEFAULTS, raw))
+
+
+def kop_build(P):
+    outs = list_outputs(P['name'])
+    return os.path.dirname(outs[0]) if outs else None
+
+
+def kop_prepare(P):
+    return {}
+
+
+def kop_locked(P):
+    return {}
+
+
+def kop_shape(P, build):
+    e = P['planet']
+    return {'R': e['radius'] * 1000.0, 'g': e['gravity'], 'top': 0.0, 'relief': 0.0, 'min_m': 0.0, 'max_m': 0.0}
+
+
+def kop_numbers(e, n):
+    top, R = n['top'], n['R']
+    a = int(np.ceil(round((top if e['atmo'] else R * 0.05) * 322.0 / 170.0) / 1000.0)) * 1000
+    n['warp'] = [0, a, a, 2 * a, 4 * a, 8 * a, 16 * a, 32 * a]
+    n['fly'] = int(round(top / 2.0, -3)) if e['atmo'] else 0
+    n['space'] = int(round(R * 0.9375, -5))
+    n['scale_height'] = top / GAS_DEPTH
+    n['hot'] = '1200'
+    n['lapse'] = '%.5g' % (e['temperature'] * (1 - GAS_TEMP[2][1]) / max(top * GAS_TEMP[2][0], 1.0))
+
+
+def kop_light(P):
+    return planet_colours(P)['light']
+
+
+def kop_orbit_colour(P):
+    return planet_colours(P)['orbit']
+
+
+def kop_biomes(P, build, with_map):
+    return [(n, dn, v, col) for n, dn, v, col, z in biome_list(P)], (biome_map(P) if with_map else None)
+
+
+def kop_body(P, mod_name, e, n, tex, biomes):
+    name = P['name']
+    c = planet_colours(P)
+    v4, num = kopmod.v4, kopmod.cfg_num
+    props = [('displayName', kopmod.display_name(e, name)), ('description', kopmod.cfg_text(e['description'] or 'A gas giant.')),
+             ('radius', '%d' % int(round(e['radius'] * 1000))), ('geeASL', num(round(e['gravity'], 4))),
+             ('rotationPeriod', num(round(e['rotation'] * 3600.0, 1))), ('rotates', 'true'),
+             ('tidallyLocked', 'true' if e['tidally_locked'] else 'false'), ('initialRotation', num(e['initial_rotation'])),
+             ('isHomeWorld', 'false'), ('albedo', num(e['albedo'])), ('timewarpAltitudeLimits', ' '.join(str(x) for x in n['warp']))]
+    if biomes and tex.get('biomes'):
+        props.append(('biomeMap', tex['biomes']))
+    props.append(['ScienceValues', [('landedDataValue', '10'), ('splashedDataValue', '10'), ('flyingLowDataValue', '10'),
+                                    ('flyingHighDataValue', '9'), ('inSpaceLowDataValue', '9'), ('inSpaceHighDataValue', '8'),
+                                    ('recoveryValue', '8'), ('flyingAltitudeThreshold', '%d' % n['fly']),
+                                    ('spaceAltitudeThreshold', '%d' % n['space'])]])
+    if biomes and tex.get('biomes'):
+        props.append(kopmod.biomes_node(biomes))
+    body = [('name', name), ('identifier', '%s/%s' % (mod_name, name)), ('cacheFile', '%s/Cache/%s.bin' % (mod_name, name)),
+            ['Template', [('name', 'Jool'), ('removeAtmosphere', 'true'), ('removeAllPQSMods', 'true')]],
+            ['Properties', props]]
+    if e['atmo']:
+        top = n['top']; t0 = e['temperature']
+        temp = [(int(round(top * f / 1000.0)) * 1000, round(t0 * r)) for f, r in GAS_TEMP]
+        body.append(['Atmosphere', [
+            ('enabled', 'True'), ('oxygen', 'False'), ('altitude', '%d' % int(round(top))), ('adiabaticIndex', num(e['adiabatic'])),
+            ('atmosphereMolarMass', num(e['molar_mass'])), ('temperatureSeaLevel', num(t0)),
+            ('staticPressureASL', num(e['pressure'])), ('ambientColor', v4(c['ambient'])), ('lightColor', v4(c['light'], 0.5)),
+            ['AtmosphereFromGround', [('waveLength', v4(c['light'], 0.5))]],
+            ['temperatureCurve', kopmod.curve_keys(temp)],
+            ['temperatureSunMultCurve', kopmod.sun_mult_keys(top)],
+            ['temperatureLatitudeBiasCurve', [('key', '0\t8\t0\t0'), ('key', '40\t0\t-0.4\t-0.4'), ('key', '90\t-30\t-0.7\t0')]],
+            ['temperatureLatitudeSunMultCurve', [('key', '0\t14\t0\t0'), ('key', '45\t11\t-0.1\t-0.1'), ('key', '90\t4\t-0.2\t0')]],
+            ['temperatureAxialSunBiasCurve', [('key', '0\t0\t0\t0')]], ['temperatureAxialSunMultCurve', [('key', '0\t0\t0\t0')]],
+            ['temperatureEccentricityBiasCurve', [('key', '0\t0\t0\t0')]],
+            ['pressureCurve', kopmod.pressure_keys(e['pressure'], top, 17, GAS_DEPTH)]]])
+    body.append(kopmod.orbit_node(e, c['orbit']))
+    body.append(['ScaledVersion', [('type', 'Atmospheric' if e['atmo'] else 'Vacuum'), ('fadeStart', '50000'), ('fadeEnd', '60000'),
+                                   ('sphericalModel', 'False'), ('deferMesh', 'False'),
+                                   ['OnDemand', [('texture', tex['color']), ('normals', tex['normal'])]],
+                                   ['Material', [('color', '1,1,1,1'), ('shininess', '0'), ('specColor', '0.0,0.0,0.0,1.0'),
+                                                 ('rimPower', '2.4'), ('opacity', '1'), ('rimBlend', '0.2'),
+                                                 ['Gradient', [(k, v4(g)) for k, g in zip(('0.0', '0.5', '1.0'), c['gradient'])]]]]]])
+    if tex.get('ring'):
+        r = ring_entry(P.get('rings'))
+        body.append(['Rings', [['Ring', [('innerRadius', '%d' % round(r['inner'] * 1000)), ('outerRadius', '%d' % round(r['outer'] * 1000)),
+                                         ('angle', '%g' % float(r['angle'])), ('texture', tex['ring']), ('color', '1,1,1,1'),
+                                         ('lockRotation', 'false'), ('useNewShader', 'true')]]]])
+    return ['Body', body]
+
+
+def kop_flow(P, build):
+    return os.path.isfile(os.path.join(build, P['name'] + '_flow.truecolor')) if build else bool(P['files'].get('flow'))
+
+
+def kop_textures(P, build, tdir):
+    name = P['name']
+    j = lambda f: os.path.join(tdir, f)
+    out = [(j(name + '_color.dds'), 'colour map', 'color'), (j(name + '_normal.dds'), 'normal map', 'normal')]
+    if kop_flow(P, build):
+        out.append((os.path.join(kopmod.sub_dir(tdir, 'GiantFlow'), name + '_flow.truecolor'), 'flow map', 'flow'))
+    if build and os.path.isfile(os.path.join(build, name + '_emissive.png')):
+        out.append((j(name + '_emissive.dds'), 'emissive map', 'emissive'))
+    if has_rings(P) and (not build or os.path.isfile(os.path.join(build, name + '_ring.png'))):
+        out.append((j(name + '_ring.dds'), 'ring texture', 'ring'))
+    if has_aurora(P):
+        out += [(j(name + '_aurora.dds'), 'aurora texture', None), (j(name + '_aurora_top.dds'), 'aurora texture (top)', None)]
+    return out
+
+
+def kop_cloud_cfgs(P):
+    return [(P['name'] + '_aurora.cfg', 'aurora config (EVE)')] if has_aurora(P) else []
+
+
+def kop_write_textures(P, build, tdir, cloud_dir, rel, log):
+    name = P['name']
+    jobs = [('color', name + '_color', DDS_BC1), ('normal', name + '_normal', DDS_NM)]
+    if os.path.isfile(os.path.join(build, name + '_emissive.png')):
+        jobs.append(('emissive', name + '_emissive', DDS_BC1))
+    if has_rings(P) and os.path.isfile(os.path.join(build, name + '_ring.png')):
+        jobs.append(('ring', name + '_ring', DDS_BC3))
+    written = export_maps(build, name, P, jobs, tdir, log=log)
+    if kop_flow(P, build):
+        written += export_maps(build, name, P, [('flow', name + '_flow', 'truecolor (EVE)')], kopmod.sub_dir(tdir, 'GiantFlow'), log=log)
+    cfgs = []
+    if has_aurora(P):
+        for w in export_aurora(P, name, name + '_aurora', DDS_BC3, tdir, True, log, cfg_path=rel(tdir)):
+            (cfgs if w.endswith('.cfg') else written).append(w)
+    return written, cfgs
+
+
+def kop_extras(P, plan, rel, mod):
+    name, e = P['name'], P['planet']
+    out = []
+    if e['clouds']:
+        tdir = plan['tex']
+        flow = rel(os.path.join(kopmod.sub_dir(tdir, 'GiantFlow'), name + '_flow')) if kop_flow(P, kop_build(P)) else None
+        text = clouds_cfg(P, rel(os.path.join(tdir, name + '_color')), flow)
+        out.append((plan['clouds'], text, 'cloud layer (EVE)', text))
+        if plan.get('pqs'):
+            out.append((plan['pqs'], lambda t: kopmod.merge_pqs(t, name), 'cloud PQS list', ''))
+    if has_atmo(P):
+        P2 = copy.deepcopy(P)
+        P2['atmosphere']['radius'] = e['radius']
+        a, full = atmo_cfg(P2, name), atmo_planets(P2, name)
+        out += [(plan['atmo'], a, 'Scatterer atmosphere', a),
+                (plan['plist'], lambda t: kopmod.merge_planets_list(t, full, name), 'Scatterer planet list', full)]
+    return out
+
+
+def kop_preview_extra(P, rel, tdir):
+    if not has_aurora(P):
+        return {}
+    j = lambda f: rel(os.path.join(tdir, f))
+    return {'Aurora (EVE)': aurora_cfg(P, P['name'], j(P['name'] + '_aurora'), j(P['name'] + '_aurora_top'))}
+
+
+def write_flow(P, path, rgb=None):
+    F = copy.deepcopy(FLOW_DEFAULTS)
+    sp = os.path.join(FLOWS, P['name'] + '.json')
+    if os.path.isfile(sp):
+        try:
+            with open(sp) as f:
+                F = merge(FLOW_DEFAULTS, json.load(f))
+        except Exception:
+            pass
+    gen = None
+    if F.get('use_generator', True):
+        sync_gen_storms(F, P)
+        gen = GenFlow(P)
+    u, v, _ = flow_field(F, 2048, 1024, rgb, gen)
+    save_truecolor(encode_flow(u, v, float(F['strength'])), path)
 
 
 def render_sphere(tex, S, tilt, vlat, vlon, emis=None, light=None):
@@ -2694,7 +2963,11 @@ FLOW_DEFAULTS = {
     'calm': [65, 82],
     'strength': 100.0,
     'storms': [],
-    'preview_motion': 8.0,
+    'preview_motion': 10.0,
+    'use_generator': True,
+    'swirls': 1.0,
+    'poles': True,
+    'gen_key': '',
 }
 
 
@@ -2749,7 +3022,193 @@ def detect_edges(rgb, sensitivity=0.3, min_gap=4.0, limit=80.0):
     return sorted([round(float(lat[i]), 1) for i in keep], reverse=True)
 
 
-def flow_field(F, W=2048, H=1024, rgb=None):
+def list_outputs(name=None):
+    out = []
+    if os.path.isdir(OUTROOT):
+        for d in os.listdir(OUTROOT):
+            dp = os.path.join(OUTROOT, d)
+            if d == 'flows' or not os.path.isdir(dp): continue
+            for f in os.listdir(dp):
+                if f.lower().endswith('_color.png') and (name is None or f[:-10] == name):
+                    p = os.path.join(dp, f)
+                    out.append((os.path.getmtime(p), p))
+    return [p for _, p in sorted(out, reverse=True)]
+
+
+def gen_preset_for(tex):
+    tp = texture_path(tex)
+    if not tp: return None, None
+    body = body_of(tp)
+    cands = [os.path.join(os.path.dirname(tp), body + '_preset.json')]
+    cands += [os.path.join(os.path.dirname(p), body + '_preset.json') for p in list_outputs(body)]
+    cands.append(os.path.join(PRESETS, body + '.json'))
+    for p in cands:
+        if not os.path.isfile(p): continue
+        try:
+            with open(p) as f:
+                P = normalize(merge(DEFAULTS, json.load(f)))
+        except Exception:
+            continue
+        P.setdefault('name', body)
+        return P, p
+    return None, None
+
+
+GEN_R = float(360.0 / np.sqrt(2))
+
+
+def gen_storms(P):
+    out = []
+    st = P['storms']
+    rng = np.random.default_rng(int(P['seed']))
+    for k in range(int(st['count'])):
+        la = float(np.float32(rng.uniform(*st['lat_range']) * D)) / float(D)
+        lo = float(np.float32(rng.uniform(0, 2 * np.pi))) / float(D)
+        sg = float(np.float32(rng.uniform(*st['size'])))
+        sgn = int(rng.choice([-1, 1]))
+        out.append({'lat': la, 'lon': lo % 360.0, 'radius': sg * GEN_R, 'aspect': 1.0, 'strength': float(st['turns']),
+                    'spin': -sgn, 'kind': 'small'})
+    nb = len(P.get('big_storms', []))
+    for j, b in enumerate(all_big(P)):
+        out.append({'lat': float(b['lat']), 'lon': float(b['lon']) % 360.0, 'radius': float(b['size']) * GEN_R,
+                    'aspect': float(b['aspect']), 'strength': float(b['turns']), 'spin': -1 if float(b['spin']) >= 0 else 1,
+                    'kind': 'big' if j < nb else 'chain'})
+    return out
+
+
+def gen_storm_key(P):
+    st = P['storms']
+    return json.dumps([P['seed'], [st.get(k) for k in ('count', 'lat_range', 'size', 'turns')],
+                       P.get('big_storms'), P.get('storm_chains')], sort_keys=True, default=str)
+
+
+def sync_gen_storms(F, P):
+    key = gen_storm_key(P)
+    if F.get('gen_key') == key:
+        return False
+    if not F.get('gen_key'):
+        F['calm'] = [float(c) for c in P['polar_calm']]
+    F['storms'] = [s for s in F['storms'] if s.get('kind') not in ('small', 'big', 'chain')] + gen_storms(P)
+    F['gen_key'] = key
+    return True
+
+
+class GenFlow:
+
+    CACHE = os.path.join(tempfile.gettempdir(), 'gasgiant_work', 'genflow')
+
+    @staticmethod
+    def strip(P):
+        P = copy.deepcopy(P)
+        P['storms'] = dict(P['storms'], count=0)
+        P['big_storms'] = []; P['storm_chains'] = []
+        return P
+
+    @classmethod
+    def cache_path(cls, P, W=1024, keyframes=None):
+        P = cls.strip(P)
+        K = max(1, int(keyframes or P['keyframes']))
+        key = hashlib.sha1(('%s|%s|%d|%d|edge2' % (VERSION, flow_key(P), min(W, 2048), K)).encode()).hexdigest()[:16]
+        return os.path.join(cls.CACHE, key + '.npz')
+
+    def __init__(self, P, W=1024, keyframes=None, cancel=None):
+        storms = gen_storms(P)
+        cp = self.cache_path(P, W, keyframes)
+        P = self.strip(P)
+        K = max(1, int(keyframes or P['keyframes']))
+        self.W = min(W, 2048); self.H = self.W // 2
+        try:
+            with np.load(cp) as z:
+                self.eddy, self.jet = z['eddy'], z['jet']
+                self.polar = z['polar'] if 'polar' in z.files else None
+        except Exception:
+            f = Field(P, self.W)
+            eddy = 0
+            for k in range(K):
+                if cancel: cancel()
+                psi, pn = f.eddy_psi(k)
+                eddy = eddy + psi + pn
+            self.eddy = (eddy / np.float32(K)).astype(np.float32)
+            self.jet = (f.jet_shape()[:, 0] * np.float32(P['jets'])).astype(np.float32)
+            self.polar = f.polar_psi(0, True).astype(np.float32) if f.poles else None
+            try:
+                os.makedirs(self.CACHE, exist_ok=True)
+                arrs = {'eddy': self.eddy, 'jet': self.jet}
+                if self.polar is not None: arrs['polar'] = self.polar
+                np.savez(cp, **arrs)
+            except OSError:
+                pass
+        self.P = P
+        self.edges = sorted((round(float(ed['lat']), 1) for ed in P['edges']), reverse=True)
+        self.levels = {self.W: (self.eddy, self.polar)}
+        self.scale = 1.0
+        u, v = self.wind(storms, calm=P['polar_calm'], W=self.W)
+        lat = np.abs(grid(self.W, self.H)[0]) / D
+        m = np.hypot(u, v)[lat < min(60.0, float(P['polar_calm'][0]))]
+        self.scale = 1.0 / max(float(np.percentile(m, 99.5)) if m.size else 0.0, 1e-9)
+
+    def level(self, W):
+        if W not in self.levels:
+            H = W // 2
+            rs = lambda a: None if a is None else np.asarray(Image.fromarray(a, 'F').resize((W, H), Image.BILINEAR))
+            self.levels[W] = (rs(self.eddy), rs(self.polar))
+        return self.levels[W]
+
+    def wind(self, storms, jets=1.0, swirls=1.0, calm=(60, 76), W=None, poles=True):
+        W = min(W or self.W, self.W); H = W // 2
+        eddy, polar = self.level(W)
+        LA, LO = grid(W, H)
+        jet = np.interp(LA[:, 0], grid(1, self.H)[0][:, 0][::-1], self.jet[::-1]).astype(np.float32)[:, None]
+        pfade = 1 - ss(np.float32(calm[0]) * D, np.float32(calm[1]) * D, np.abs(LA))
+        jet = jet * np.float32(jets) * pfade
+        own = np.zeros_like(LA)
+        holds = []
+        for s in storms:
+            sg = np.float32(max(float(s.get('radius', 5.0)), 0.05) / GEN_R)
+            asp = np.float32(max(float(s.get('aspect', 1.0)), 0.2))
+            la0 = np.float32(float(s['lat']) * D)
+            dn = (LA - la0) / np.float32(2 * np.pi)
+            de = ((LO - np.float32(float(s['lon']) * D) + np.pi) % (2 * np.pi) - np.pi) * np.cos(la0) / np.float32(2 * np.pi)
+            r = np.sqrt((de / asp) ** 2 + dn ** 2)
+            k = -np.float32(float(s.get('strength', 1.0)) * (1 if int(s.get('spin', 1)) >= 0 else -1))
+            own += k * np.float32(5.18) * sg * sg * asp * np.exp(-(r / sg) ** 2)
+            if s.get('kind') != 'small':
+                holds.append(np.exp(-(r / (STORM_HOLD * sg)) ** 4))
+        dn = np.float32(0.5 / H)
+        if holds:
+            jr = jet[:, 0]
+            pj = np.concatenate([[0.0], np.cumsum(0.5 * (jr[1:] + jr[:-1]) * dn)]).astype(np.float32)
+            bg = eddy * np.float32(swirls) * pfade + pj[:, None]
+            for M in holds:
+                c = np.float32((bg * M).sum() / max(float(M.sum()), 1e-9))
+                bg = c + (bg - c) * (1 - M)
+            psi = bg + own * pfade
+            jet = 0
+        else:
+            psi = (eddy * np.float32(swirls) + own) * pfade
+        if polar is not None and poles:
+            psi = psi + polar
+        cosv = np.maximum(np.cos(LA), 1e-3)
+        dpdn = np.zeros_like(psi); dpdn[1:-1] = (psi[:-2] - psi[2:]) / (2 * dn)
+        dpde = (np.roll(psi, -1, 1) - np.roll(psi, 1, 1)) / (2 * cosv / W)
+        u = (-dpdn + jet) / cosv; v = dpde
+        u[[0, -1]] = u[[1, -2]]; v[[0, -1]] = v[[1, -2]]
+        sc = np.float32(self.scale)
+        return (u * sc).astype(np.float32), (v * sc).astype(np.float32)
+
+
+def flow_field(F, W=2048, H=1024, rgb=None, gen=None):
+    if gen is not None and F.get('use_generator', True):
+        u, v = gen.wind(F['storms'], F['jets'], F.get('swirls', 1.0), F['calm'], W, F.get('poles', True))
+        if u.shape != (H, W):
+            u = np.asarray(Image.fromarray(u, 'F').resize((W, H), Image.BILINEAR))
+            v = np.asarray(Image.fromarray(v, 'F').resize((W, H), Image.BILINEAR))
+        sm = float(F['smooth']) * W / 2048.0
+        if sm > 0.05:
+            u = gblur(u, sm); v = gblur(v, sm)
+        lim = np.float32(125.0 / max(float(F['strength']), 1.0))
+        f = np.minimum(np.float32(1), lim / np.maximum(np.hypot(u, v), np.float32(1e-9)))
+        return (u * f).astype(np.float32), (v * f).astype(np.float32), list(gen.edges)
     LA, LO = grid(W, H)
     d = LA / D
     if F['auto_edges'] and rgb is not None:
@@ -2816,41 +3275,92 @@ def samp_rgb(tex, x, y):
     return a * (1 - ty) + b * ty
 
 
-def flow_frames(rgb, flowimg, motion_deg=8.0, n=24, width=1024):
+def flow_frames(rgb, flowimg, motion_deg=10.0, n=64, width=768):
     h = width // 2
     tex = np.asarray(Image.fromarray(rgb).resize((width, h), Image.BOX)).astype(np.float32)
     fl = np.asarray(Image.fromarray(flowimg).resize((width, h), Image.BILINEAR)).astype(np.float32)
     fu = (fl[..., 0] - 128) / 127.0; fv = (fl[..., 1] - 128) / 127.0
-    k = motion_deg / 360.0 * width
+    fast = max(float(np.percentile(np.hypot(fu, fv), 90)), 0.02)
+    k = 2 * motion_deg / 360.0 * width / fast
     yy, xx = np.mgrid[0:h, 0:width].astype(np.float32)
+    layers = [samp_rgb(tex, xx - fu * (k * i / n), yy + fv * (k * i / n)) for i in range(n)]
     frames = []
-    for i in range(n):
-        p0 = i / n; p1 = (p0 + 0.5) % 1.0
-        c0 = samp_rgb(tex, xx - fu * k * p0, yy + fv * k * p0)
-        c1 = samp_rgb(tex, xx - fu * k * p1, yy + fv * k * p1)
-        wgt = abs(0.5 - p0) / 0.5
-        frames.append(Image.fromarray(np.clip(c0 * (1 - wgt) + c1 * wgt, 0, 255).astype(np.uint8)))
+    for i in range(n // 2):
+        w = 1 - 2.0 * i / n
+        frames.append(Image.fromarray(np.clip(layers[i] * (1 - w) + layers[i + n // 2] * w, 0, 255).astype(np.uint8)))
     return frames
 
 
-def flow_arrows(rgb, flowimg, width=1024, step=32):
-    h = width // 2
-    im = Image.fromarray(rgb).resize((width, h), Image.BOX).convert('RGB')
-    fl = np.asarray(Image.fromarray(flowimg).resize((width, h), Image.BILINEAR)).astype(np.float32)
-    dr = ImageDraw.Draw(im)
-    for y in range(step // 2, h, step):
-        for x in range(step // 2, width, step):
-            fu = (fl[y, x, 0] - 128) / 127.0; fv = (fl[y, x, 1] - 128) / 127.0
-            m = np.hypot(fu, fv)
-            if m < 0.03: continue
-            L = step * 0.9 * min(1.0, m)
-            ex, ey = x + fu / m * L, y - fv / m * L
-            col = (255, 255, 255) if fu >= 0 else (255, 200, 120)
-            dr.line([(x, y), (ex, ey)], fill=col, width=2)
-            a = np.arctan2(ey - y, ex - x)
-            for da in (2.6, -2.6):
-                dr.line([(ex, ey), (ex + 6 * np.cos(a + da), ey + 6 * np.sin(a + da))], fill=col, width=2)
-    return im
+def flow_arrows_view(bg, fu, fv, view, spacing=22, storms=(), ss_=2):
+    w, h = bg.size
+    lon0, lat0, dpp = (float(a) for a in view)
+
+    def at(x, y):
+        X = (lon0 + x * dpp) / 360.0
+        Y = (90.0 - (lat0 - y * dpp)) / 180.0
+        return samp(fu, X, Y), samp(fv, X, Y)
+    ys, xs = np.mgrid[spacing / 2.0:h:spacing, spacing / 2.0:w:spacing]
+    sx = xs.ravel().astype(np.float32); sy = ys.ravel().astype(np.float32)
+    u, v = at(sx, sy)
+    m = np.hypot(u, v)
+    ref = max(float(np.percentile(m, 97)) if m.size else 0.0, 1e-4)
+    L = np.float32(spacing * 0.92) * np.clip(m / np.float32(ref), 0, 1)
+    k = (L > 2.5) & (m > 1e-4)
+    sx, sy, L, east = sx[k], sy[k], L[k], u[k] >= 0
+    n = 6
+    paths = []
+    for sgn in (1, -1):
+        x, y = sx.copy(), sy.copy()
+        pts = []
+        for _ in range(n):
+            uu, vv = at(x, y)
+            mm = np.maximum(np.hypot(uu, vv), np.float32(1e-6))
+            x = x + sgn * uu / mm * L / (2 * n)
+            y = y - sgn * vv / mm * L / (2 * n)
+            pts.append((x, y))
+        paths.append(pts)
+    fwd, back = paths
+    line = [p for p in back[::-1]] + [(sx, sy)] + fwd
+    S = ss_
+    ov = Image.new('RGBA', (w * S, h * S), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(ov)
+    for s in storms:
+        r = float(s.get('radius', 5.0)) / dpp
+        if r < 3: continue
+        ry = r * S; rx = ry * max(float(s.get('aspect', 1.0)), 0.2) / max(np.cos(np.radians(float(s['lat']))), 0.05)
+        cy = (lat0 - float(s['lat'])) / dpp * S
+        dl = (float(s['lon']) - lon0) % 360.0
+        for cx in (dl / dpp * S, (dl - 360.0) / dpp * S):
+            if -rx < cx < w * S + rx and -ry < cy < h * S + ry:
+                dr.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), outline=(120, 200, 255, 170), width=S)
+    wid = int(2.5 * S + 0.5)
+    px = np.asarray(bg.convert('L'), np.float32)
+    lum = px[np.clip(sy.astype(np.int32), 0, h - 1), np.clip(sx.astype(np.int32), 0, w - 1)]
+    cols = {(True, False): (175, 220, 255, 245), (False, False): (255, 190, 100, 245),
+            (True, True): (15, 60, 160, 245), (False, True): (175, 75, 0, 245)}
+    halos = {False: (8, 10, 16, 160), True: (255, 255, 255, 170)}
+    arrows = []
+    for i in range(len(sx)):
+        pts = [(float(p[0][i]) * S, float(p[1][i]) * S) for p in line]
+        (x1, y1), (x2, y2) = pts[-2], pts[-1]
+        a = np.arctan2(y2 - y1, x2 - x1)
+        hs = float(np.clip(L[i] * 0.42, 5.0, 8.0)) * S
+        ca, sa = np.cos(a), np.sin(a)
+        tip = (x2 + ca * hs * 0.5, y2 + sa * hs * 0.5)
+        head = [tip, (tip[0] - ca * hs + sa * hs * 0.5, tip[1] - sa * hs - ca * hs * 0.5),
+                (tip[0] - ca * hs - sa * hs * 0.5, tip[1] - sa * hs + ca * hs * 0.5)]
+        light = bool(lum[i] > 165)
+        arrows.append((pts, head, cols[(bool(east[i]), light)], halos[light]))
+    for pts, head, col, halo in arrows:
+        dr.line(pts, fill=halo, width=wid + int(1.5 * S + 0.5), joint='curve')
+        dr.polygon(head, fill=halo, outline=halo, width=S)
+    for pts, head, col, halo in arrows:
+        dr.line(pts, fill=col, width=wid, joint='curve')
+        dr.polygon(head, fill=col)
+    ov = ov.resize((w, h), Image.LANCZOS)
+    out = bg.convert('RGBA')
+    out.alpha_composite(ov)
+    return out.convert('RGB'), ref
 
 
 def load_flow_settings(p):
@@ -2866,7 +3376,10 @@ def load_flow_settings(p):
 def build_flow(F, W=2048):
     tp = texture_path(F['texture'])
     rgb = load_texture(tp) if tp and os.path.isfile(tp) else None
-    u, v, edges = flow_field(F, W, W // 2, rgb)
+    P = gen_preset_for(F['texture'])[0] if F.get('use_generator', True) else None
+    if P:
+        sync_gen_storms(F, P)
+    u, v, edges = flow_field(F, W, W // 2, rgb, GenFlow(P) if P else None)
     return rgb, encode_flow(u, v, float(F['strength'])), edges
 
 
@@ -2926,9 +3439,12 @@ def cmd_flow(a):
     print('edges', edges)
     print('saved', os.path.relpath(outp, TOOL))
     if rgb is not None:
-        flow_arrows(rgb, img).save(os.path.join(FLOWOUT, body + '_flow_arrows.png'))
-        fr = [f.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG) for f in flow_frames(rgb, img, float(F['preview_motion']), 24, 768)]
-        fr[0].save(os.path.join(FLOWOUT, body + '_flow_preview.gif'), save_all=True, append_images=fr[1:], duration=80, loop=0)
+        fl = img.astype(np.float32)
+        bg = Image.fromarray(rgb).resize((2048, 1024), Image.LANCZOS)
+        flow_arrows_view(bg, (fl[..., 0] - 128) / 127, (fl[..., 1] - 128) / 127, (0.0, 90.0, 360.0 / 2048), 24,
+                         F['storms'])[0].save(os.path.join(FLOWOUT, body + '_flow_arrows.png'))
+        fr = [f.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG) for f in flow_frames(rgb, img, float(F['preview_motion']), 64, 768)]
+        fr[0].save(os.path.join(FLOWOUT, body + '_flow_preview.gif'), save_all=True, append_images=fr[1:], duration=50, loop=0)
         print('preview', os.path.relpath(os.path.join(FLOWOUT, body + '_flow_preview.gif'), TOOL))
     for p, sp, dp_ in eve_flow_info(F['out']):
         print('used by', p, 'speed', sp, 'displacement', dp_)
@@ -3059,8 +3575,7 @@ def cmd_make(a):
             write_normal(c, os.path.join(od, name + '_normal.dds'), float(P['normal_strength']))
             fl_path = os.path.join(od, name + '_flow.truecolor')
             if P['files'].get('flow'):
-                KF = np.stack([np.load(os.path.join(wd, 'kf%d.npy' % k)) for k in range(K)])
-                write_flow(KF, P, fl_path); del KF
+                write_flow(P, fl_path, c); clock.log('flow map done')
             elif os.path.isfile(fl_path):
                 os.remove(fl_path)
             if glows:

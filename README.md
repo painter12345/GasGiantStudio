@@ -101,9 +101,12 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
   | Preview sheet | PNG, JPG |
 
 - **Flow Map Maker:** makes EVE flow maps for **any** gas giant texture, including ones
-  you didn't make here. It finds the bands, lets neighbouring bands flow in opposite
-  directions and adds storm swirls where you click. It shows the result as arrows or as
-  a looping animation.
+  you didn't make here. For planets made here it uses the generator's own wind: the real
+  jet directions, the curls along the band edges, the polar features and every storm, small
+  ones included. For other textures it finds the bands, lets neighbouring bands flow in
+  opposite directions and adds storm swirls where you click. It shows the result as arrows
+  or as a looping animation. It opens on your newest build, and a build's own flow map is
+  the same one the Flow Map Maker makes for that planet.
 
 ![Polar features](docs/poles.png)
 
@@ -120,6 +123,31 @@ yours complains, you can run Gas Giant Studio from source instead; it's the same
 ![Aurora](docs/aurora.png)
 
 ![Flow Map Maker](docs/flow_maps.png)
+
+## Putting the planet into your mod
+
+The **Config** tab writes everything KSP needs. Fill in the display name, description, the body
+it orbits, radius, surface gravity, day length, the orbit and the atmosphere (pressure and
+temperature at the cloud tops, height). The tab works out the rest: mass and density, orbital
+period and sphere of influence, the Kopernicus pressure and temperature curves, time warp
+limits, science altitudes, colours and a biome map. "What gets written" shows every config
+before anything is saved.
+
+Press Build, pick your mod's folder inside GameData and press **Export to mod**. You see the
+list of files first; then it writes:
+
+| What | Where |
+|---|---|
+| Colour, normal, emissive, ring, aurora and biome textures | `Textures/PluginData/` |
+| Flow map | `Textures/PluginData/GiantFlow/` |
+| Kopernicus config | `Configs/<star>/<Planet>.cfg` |
+| EVE cloud layer (colour map moved by the flow map) | `Configs/volumetricclouds/Clouds/` (planet added to `pqs.cfg`) |
+| Scatterer atmosphere | `Scatterer/Planets/<Planet>/atmo.cfg` |
+| Scatterer planet list entry | `Scatterer/planetsList_<star>.cfg` |
+
+Folders that already exist in your mod are used as they are. If the planet was exported before,
+its files and list entries are replaced in place, never doubled, and anything that is already
+there is backed up first.
 
 ## Using the files in KSP
 
